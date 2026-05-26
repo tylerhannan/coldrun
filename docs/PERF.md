@@ -26,7 +26,9 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | **Vectorized filters** | Fast paths for `AND`/`OR`, `col <> 0`, `col <> ''`, date ranges, `LIKE '%x%'` |
 | **Fast global aggregates** | `COUNT(*)` / `SUM` / `AVG` / `MIN`/`MAX` on one column without per-row interpreter |
 | **LZ4 column files** | Optional compression on flush for payloads &gt; 4 KB (backward-compatible read) |
-| **Integer GROUP BY** | Packed `u128` keys for up to two int/date group columns (`group_int.rs`) |
+| **Integer GROUP BY** | Packed `u128` keys for up to four int/date keys incl. `col - N` (Q36) (`group_int.rs`) |
+| **Referer host GROUP BY** | Cached regex host extraction for Q29 (`group_referrer.rs`) |
+| **HAVING shortcut** | Empty result when `COUNT(*) > N` and `N` ≥ filtered rows (Q28–29 demo) |
 | **Top-K partial sort** | `select_nth_unstable_by` before full sort when `LIMIT` + many groups |
 | **Int COUNT DISTINCT** | `HashSet<i64>` instead of string keys on numeric columns |
 | **PK zone index** | Min/max zones on `CounterID` + `EventDate`; prune dashboard filters (Q36–43) |
@@ -57,13 +59,13 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | overnight 1–2 | Regression script; 100k/500k baselines in `docs/overnight/` |
 | overnight 4–11 | Q27/Q29 fast paths, sparse masks, mmap, rayon load, bench-all, CI |
 | batch 2 (12–17) | bench-all baseline, memchr LIKE, IN-list, Q7 min/max, ahash, README/CI badge |
+| batch 3 (18–21) | Referer GROUP BY, 4-key int GROUP BY, HAVING shortcut, harness README, bench-compare |
 
 ## Next (planned)
 
-1. **REGEXP_REPLACE group cache** — Q29 still ~0.18s at 100k (biggest remaining demo cost)
-2. **Multi-column GROUP BY keys** — Q36 ClientIP arithmetic groups
-3. **mmap zero-copy numeric** — keep `Arc<[T]>` column buffers after decode
-4. **ClickBench harness** — polish `clickbench/coldrun/` for cloud repro
+1. **mmap zero-copy numeric** — keep `Arc<[T]>` column buffers after decode
+2. **String multi-key GROUP BY** — Q35 `GROUP BY 1, URL` without full interpreter loop
+3. **Cloud baseline** — full `hits.parquet` numbers on `c6a.4xlarge`
 
 ## Honest scope
 

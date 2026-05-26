@@ -2,6 +2,7 @@
 .coldrun/
 .coldrun-demo/
 .coldrun-bench/
+.coldrun-bench-all/
 clickbench/coldrun/.clickbench/
 smoke-all.log
 logs/overnight/
