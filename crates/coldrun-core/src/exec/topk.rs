@@ -1,4 +1,4 @@
-use crate::sql::ParsedQuery;
+use crate::sql::{ParsedQuery, SelectProjection};
 
 /// If the query has ORDER BY + LIMIT and many rows, keep only the top (limit + offset) rows.
 pub fn truncate_to_top_k(parsed: &ParsedQuery, columns: &[String], rows: &mut Vec<Vec<String>>) {
@@ -10,7 +10,7 @@ pub fn truncate_to_top_k(parsed: &ParsedQuery, columns: &[String], rows: &mut Ve
     if rows.len() <= need.saturating_mul(4) {
         return;
     }
-    let order_col = match resolve_first_order_column(parsed, columns) {
+    let order_col = match resolve_first_order_column(parsed, columns, &parsed.select_items) {
         Some(i) => i,
         None => return,
     };
@@ -28,14 +28,32 @@ pub fn truncate_to_top_k(parsed: &ParsedQuery, columns: &[String], rows: &mut Ve
     rows.truncate(need);
 }
 
-fn resolve_first_order_column(parsed: &ParsedQuery, columns: &[String]) -> Option<usize> {
+fn resolve_first_order_column(
+    parsed: &ParsedQuery,
+    columns: &[String],
+    projections: &[SelectProjection],
+) -> Option<usize> {
     let (expr, _) = parsed.order_by.first()?;
     if let sqlparser::ast::Expr::Identifier(ident) = expr {
-        return columns.iter().position(|c| c == &ident.value);
+        if let Some(i) = columns.iter().position(|c| c == &ident.value) {
+            return Some(i);
+        }
+        for (i, p) in projections.iter().enumerate() {
+            if p.alias.as_deref() == Some(&ident.value) {
+                return Some(i);
+            }
+        }
     }
     if let sqlparser::ast::Expr::Function(f) = expr {
         if f.name.to_string().to_uppercase() == "COUNT" {
-            return columns.iter().position(|c| c == "count()");
+            if let Some(i) = columns.iter().position(|c| c == "count()") {
+                return Some(i);
+            }
+            for (i, p) in projections.iter().enumerate() {
+                if matches!(&p.kind, crate::sql::SelectItemKind::CountAll | crate::sql::SelectItemKind::Count(_)) {
+                    return Some(i);
+                }
+            }
         }
     }
     if let Some(name) = crate::sql::expr_column_name(expr) {

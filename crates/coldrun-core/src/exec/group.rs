@@ -29,6 +29,12 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
         return Ok(result);
     }
 
+    if let Some(result) = super::group_utf8::try_execute_grouped_utf8(
+        &table, parsed, row_count,
+    )? {
+        return Ok(result);
+    }
+
     if let Some(result) = try_execute_grouped_int(&table, parsed, row_count)? {
         return Ok(result);
     }

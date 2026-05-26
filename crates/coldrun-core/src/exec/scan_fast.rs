@@ -1,6 +1,6 @@
 //! Fast scan for `SELECT col … ORDER BY … LIMIT` (Q25–Q27 pattern).
 
-use sqlparser::ast::Expr;
+use sqlparser::ast::{BinaryOperator, Expr, Value};
 
 use crate::sql::{expr_column_name, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, Table};
@@ -15,6 +15,10 @@ pub fn try_execute_scan_fast(
     parsed: &ParsedQuery,
     row_count: usize,
 ) -> Result<Option<QueryResult>> {
+    if let Some(r) = try_scan_int_eq(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
+
     if parsed.select_all || parsed.select_items.len() != 1 {
         return Ok(None);
     }
@@ -82,6 +86,73 @@ fn try_scan_two_order(
 
     let out_col = table.column(sel_name)?;
     Ok(Some(build_scan_result(proj, out_col, &indices, parsed)?))
+}
+
+/// Q20: `SELECT UserID FROM hits WHERE UserID = ?` — no sort/limit.
+fn try_scan_int_eq(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.select_all
+        || parsed.select_items.len() != 1
+        || !parsed.order_by.is_empty()
+        || parsed.limit.is_some()
+        || parsed.offset.is_some()
+    {
+        return Ok(None);
+    }
+    let proj = &parsed.select_items[0];
+    let SelectItemKind::Column(sel_expr) = &proj.kind else {
+        return Ok(None);
+    };
+    let sel_name = expr_column_name(sel_expr).ok_or_else(|| crate::Error::msg("scan col"))?;
+    let Some(where_expr) = parsed.where_expr.as_ref() else {
+        return Ok(None);
+    };
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = where_expr
+    else {
+        return Ok(None);
+    };
+    let Some(col_name) = expr_column_name(left) else {
+        return Ok(None);
+    };
+    if col_name != sel_name {
+        return Ok(None);
+    }
+    let Expr::Value(Value::Number(n, _)) = &**right else {
+        return Ok(None);
+    };
+    let lit: i64 = n.parse().map_err(|e| crate::Error::msg(format!("bad lit: {e}")))?;
+    let col = table.column(&col_name)?;
+    let label = projection_label(proj);
+    let mut rows = Vec::new();
+    match col {
+        ColumnData::Int64(v) => {
+            for &x in v.iter().take(row_count) {
+                if x == lit {
+                    rows.push(vec![x.to_string()]);
+                }
+            }
+        }
+        ColumnData::Int32(v) => {
+            let lit32 = lit as i32;
+            for &x in v.iter().take(row_count) {
+                if x == lit32 {
+                    rows.push(vec![x.to_string()]);
+                }
+            }
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(QueryResult {
+        columns: vec![label],
+        rows,
+    }))
 }
 
 fn order_column_name(expr: &Expr) -> String {

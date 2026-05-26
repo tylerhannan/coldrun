@@ -2,7 +2,7 @@
 
 use ahash::AHashMap;
 
-use sqlparser::ast::{BinaryOperator, Expr, Value};
+use sqlparser::ast::{BinaryOperator, DateTimeField, Expr, Value};
 
 use crate::sql::{projection_label, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, ColumnType, Table};
@@ -118,6 +118,17 @@ fn is_int_group_expr(table: &Table, expr: &Expr) -> Result<bool> {
                 && matches!(&**right, Expr::Value(Value::Number(_, _))))
         }
         Expr::Value(Value::Number(_, _)) => Ok(true),
+        Expr::Extract {
+            field: DateTimeField::Minute,
+            expr,
+            ..
+        } => {
+            if let Expr::Identifier(id) = &**expr {
+                Ok(table.column_type(&id.value) == Some(ColumnType::Timestamp))
+            } else {
+                Ok(false)
+            }
+        }
         _ => Ok(false),
     }
 }
@@ -145,6 +156,21 @@ fn eval_int_group_key(table: &Table, expr: &Expr, row: usize) -> Result<i64> {
         Expr::Value(Value::Number(n, _)) => n
             .parse::<i64>()
             .map_err(|e| crate::Error::msg(format!("bad number: {e}"))),
+        Expr::Extract {
+            field: DateTimeField::Minute,
+            expr,
+            ..
+        } => {
+            let col = table.column(match &**expr {
+                Expr::Identifier(id) => &id.value,
+                _ => return Err(crate::Error::msg("extract col")),
+            })?;
+            let micros = match col {
+                ColumnData::Timestamp(v) => v[row],
+                _ => 0,
+            };
+            Ok(((micros / 1_000_000) / 60) % 60)
+        }
         _ => Err(crate::Error::msg("int group key")),
     }
 }
