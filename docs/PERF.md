@@ -56,12 +56,14 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | round 5 | Scan sort fast path, hash reserve, in-place mask AND/OR |
 | overnight 1–2 | Regression script; 100k/500k baselines in `docs/overnight/` |
 | overnight 4–11 | Q27/Q29 fast paths, sparse masks, mmap, rayon load, bench-all, CI |
+| batch 2 (12–17) | bench-all baseline, memchr LIKE, IN-list, Q7 min/max, ahash, README/CI badge |
 
 ## Next (planned)
 
-1. **Parallel load** — Parquet decode threads
-2. **SIMD** — aggregations and string `contains` for `LIKE`
-3. **mmap columns** — zero-copy read for cold runs
+1. **REGEXP_REPLACE group cache** — Q29 still ~0.18s at 100k (biggest remaining demo cost)
+2. **Multi-column GROUP BY keys** — Q36 ClientIP arithmetic groups
+3. **mmap zero-copy numeric** — keep `Arc<[T]>` column buffers after decode
+4. **ClickBench harness** — polish `clickbench/coldrun/` for cloud repro
 
 ## Honest scope
 

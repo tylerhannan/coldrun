@@ -1,5 +1,7 @@
 # Coldrun
 
+[![CI](https://github.com/tylerhannan/coldrun/actions/workflows/ci.yml/badge.svg)](https://github.com/tylerhannan/coldrun/actions/workflows/ci.yml)
+
 > **Draft / WIP** — early experiment; not ready for production or serious use.
 
 **A smol columnar SQL toy — an AI tooling experiment.**
@@ -39,9 +41,11 @@ Synthetic `hits` rows are generated in-process — same schema shape, not real C
 ```bash
 ./scripts/smoke-demo.sh          # queries 1–15, ~10k rows (default)
 ./scripts/smoke-all.sh           # all 43 queries; optional row count, e.g. ./scripts/smoke-all.sh 100000
+./scripts/bench-all.sh 100000    # time every query (see docs/overnight/bench-all-100k.md)
+./scripts/overnight-regression.sh 100000  # smoke + bench Q1–10
 ```
 
-Details: [`docs/SMOKE-DEMO.md`](docs/SMOKE-DEMO.md).
+Details: [`docs/SMOKE-DEMO.md`](docs/SMOKE-DEMO.md) · [`docs/PERF.md`](docs/PERF.md) · CI on push
 
 Manual one-off:
 
