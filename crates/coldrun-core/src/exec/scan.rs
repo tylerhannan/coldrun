@@ -6,11 +6,17 @@ use crate::storage::Database;
 use crate::Result;
 
 use super::filter::build_filter_mask;
+use super::scan_fast::try_execute_scan_fast;
 use super::QueryResult;
 
 pub fn execute_scan(db: &Database, parsed: &ParsedQuery) -> Result<QueryResult> {
     let table = db.open_table_for_query("hits", parsed)?;
     let row_count = table.row_count() as usize;
+
+    if let Some(result) = try_execute_scan_fast(&table, parsed, row_count)? {
+        return Ok(result);
+    }
+
     let mask = build_filter_mask(&table, parsed.where_expr.as_ref(), row_count)?;
 
     let column_names: Vec<String> = if parsed.select_all {

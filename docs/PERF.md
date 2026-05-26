@@ -23,6 +23,19 @@ Compare before/after on the same machine with the same `ROWS` argument.
 | **Top-K partial sort** | `select_nth_unstable_by` before full sort when `LIMIT` + many groups |
 | **Int COUNT DISTINCT** | `HashSet<i64>` instead of string keys on numeric columns |
 | **PK zone index** | Min/max zones on `CounterID` + `EventDate`; prune dashboard filters (Q36–43) |
+| **Multi global agg** | One mask pass for `SUM` + `COUNT(*)` + `AVG` (Q3) |
+| **Global COUNT DISTINCT** | Dedicated fast path for int/utf8 columns (Q5–Q6) |
+| **Column-order scan** | `SELECT col ORDER BY col LIMIT` sorts via row indices (Q25–Q26) |
+| **Group hash reserve** | Pre-size hash tables from filtered row count |
+
+## Changelog
+
+| Commit | Focus |
+|--------|--------|
+| v0.1 | Column pruning, vectorized filters, LZ4 |
+| round 1–3 | Int GROUP BY, top-K, zones |
+| round 4 | Multi global agg, global COUNT DISTINCT |
+| round 5 | Scan sort fast path, hash reserve, in-place mask AND/OR |
 
 ## Next (planned)
 

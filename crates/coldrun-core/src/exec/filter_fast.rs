@@ -182,11 +182,19 @@ fn try_like_mask(
 }
 
 fn and_masks(a: &[bool], b: &[bool]) -> Vec<bool> {
-    a.iter().zip(b).map(|(x, y)| *x && *y).collect()
+    let mut out = a.to_vec();
+    for (x, y) in out.iter_mut().zip(b) {
+        *x &= *y;
+    }
+    out
 }
 
 fn or_masks(a: &[bool], b: &[bool]) -> Vec<bool> {
-    a.iter().zip(b).map(|(x, y)| *x || *y).collect()
+    let mut out = a.to_vec();
+    for (x, y) in out.iter_mut().zip(b) {
+        *x |= *y;
+    }
+    out
 }
 
 fn cmp_int_col(col: &ColumnData, lit: i64, op: &BinaryOperator, row_count: usize) -> Vec<bool> {

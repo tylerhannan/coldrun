@@ -6,6 +6,7 @@ mod group;
 mod group_int;
 mod topk;
 mod scan;
+mod scan_fast;
 
 use crate::sql::{parse_query, projection_label};
 use crate::storage::ColumnData;

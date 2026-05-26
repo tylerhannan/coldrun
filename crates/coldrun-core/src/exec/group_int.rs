@@ -33,7 +33,9 @@ pub fn try_execute_grouped_int(
     };
 
     let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
-    let mut groups: HashMap<u128, GroupBucket> = HashMap::new();
+    let selected = mask.iter().filter(|&&b| b).count();
+    let mut groups: HashMap<u128, GroupBucket> =
+        HashMap::with_capacity((selected / 8).max(16));
 
     let col_refs: Vec<&ColumnData> = spec
         .col_names
