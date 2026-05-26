@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use ahash::AHashSet;
 
 use sqlparser::ast::Expr;
 
@@ -14,8 +14,8 @@ pub struct AggState {
     pub sum: Option<i128>,
     pub avg_sum: Option<i128>,
     pub avg_count: u64,
-    pub count_distinct: Option<HashSet<String>>,
-    pub count_distinct_i64: Option<HashSet<i64>>,
+    pub count_distinct: Option<AHashSet<String>>,
+    pub count_distinct_i64: Option<AHashSet<i64>>,
     pub min_i64: Option<i64>,
     pub max_i64: Option<i64>,
     pub min_str: Option<String>,

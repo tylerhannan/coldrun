@@ -1,6 +1,6 @@
 //! Fast GROUP BY for integer-only keys (no per-row String allocation).
 
-use std::collections::HashMap;
+use ahash::AHashMap;
 
 use sqlparser::ast::Expr;
 
@@ -35,8 +35,8 @@ pub fn try_execute_grouped_int(
 
     let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
     let selected = mask.iter().filter(|&&b| b).count();
-    let mut groups: HashMap<u128, GroupBucket> =
-        HashMap::with_capacity((selected / 8).max(16));
+    let mut groups: AHashMap<u128, GroupBucket> =
+        AHashMap::with_capacity((selected / 8).max(16));
 
     let col_refs: Vec<&ColumnData> = spec
         .col_names
@@ -140,7 +140,7 @@ fn unpack_key(key: u128, ncols: usize) -> Vec<String> {
 fn finish_groups(
     table: &Table,
     parsed: &ParsedQuery,
-    groups: HashMap<u128, GroupBucket>,
+    groups: AHashMap<u128, GroupBucket>,
 ) -> Result<Option<QueryResult>> {
     let ncols = parsed.group_by.len();
     let column_names: Vec<String> = parsed

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use ahash::AHashMap;
 
 use sqlparser::ast::Expr;
 
@@ -30,8 +30,8 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
     let mask = build_filter_mask(&table, parsed.where_expr.as_ref(), row_count)?;
 
     let selected = mask.iter().filter(|&&b| b).count();
-    let mut groups: HashMap<Vec<String>, GroupBucket> =
-        HashMap::with_capacity((selected / 8).max(16));
+    let mut groups: AHashMap<Vec<String>, GroupBucket> =
+        AHashMap::with_capacity((selected / 8).max(16));
 
     let row_iter: Vec<usize> = if mask_is_sparse(&mask) {
         selected_indices(&mask)
