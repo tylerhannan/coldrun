@@ -20,6 +20,9 @@ pub fn try_execute_global(
     }
 
     if parsed.select_items.len() > 1 {
+        if let Some(r) = try_execute_global_multi_distinct(table, parsed, row_count)? {
+            return Ok(Some(r));
+        }
         return try_execute_global_multi(table, parsed, row_count);
     }
 
@@ -129,6 +132,42 @@ enum SimpleAgg {
     Sum(String),
     Avg(String),
     CountDistinct(String),
+}
+
+/// Q5+Q6 style: two global `COUNT(DISTINCT col)` in one query (one mask pass).
+fn try_execute_global_multi_distinct(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.select_items.len() != 2 {
+        return Ok(None);
+    }
+    let mut names = Vec::new();
+    for proj in &parsed.select_items {
+        match &proj.kind {
+            SelectItemKind::CountDistinct(e) => {
+                names.push(expr_column_name(e).ok_or_else(|| crate::Error::msg("col"))?);
+            }
+            _ => return Ok(None),
+        }
+    }
+
+    let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
+    let mut columns = Vec::new();
+    let mut values = Vec::new();
+    for (proj, name) in parsed.select_items.iter().zip(names.iter()) {
+        columns.push(projection_label(proj));
+        values.push(
+            count_distinct_col_masked(table, name, &mask)
+                .ok_or_else(|| crate::Error::msg("count distinct"))?
+                .to_string(),
+        );
+    }
+    Ok(Some(QueryResult {
+        columns,
+        rows: vec![values],
+    }))
 }
 
 fn classify_simple(kind: &SelectItemKind) -> Result<Option<SimpleAgg>> {
