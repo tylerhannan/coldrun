@@ -23,7 +23,7 @@ Coldrun is the database under test. It does not run ClickBench for other systems
 ## Prerequisites
 
 - Rust stable (`rustup` recommended); ensure `cargo` is on your `PATH` (reload the shell after install, or `source "$HOME/.cargo/env"`)
-- For full dataset: ~15 GB download for `hits.parquet`
+- **No dataset download required** for local dev — use synthetic demo data below.
 
 ## Build
 
@@ -32,32 +32,37 @@ cargo build --release -p coldrun-cli
 # binary: target/release/coldrun
 ```
 
-## Quick smoke (no download)
+## Local development (no download)
 
-Synthetic ~10k rows, runs ClickBench queries 1–15. Full details: [`docs/SMOKE-DEMO.md`](docs/SMOKE-DEMO.md). All 43: `./scripts/smoke-all.sh`.
+Synthetic `hits` rows are generated in-process — same schema shape, not real ClickBench data. Good enough to hack on SQL, storage, and the executor on a laptop.
 
 ```bash
-./scripts/smoke-demo.sh
+./scripts/smoke-demo.sh          # queries 1–15, ~10k rows (default)
+./scripts/smoke-all.sh           # all 43 queries; optional row count, e.g. ./scripts/smoke-all.sh 100000
 ```
 
-Or manually (after `cargo build --release -p coldrun-cli`):
+Details: [`docs/SMOKE-DEMO.md`](docs/SMOKE-DEMO.md).
+
+Manual one-off:
 
 ```bash
 ./target/release/coldrun local --demo 10000 --sql "SELECT COUNT(*) FROM hits"
 ./target/release/coldrun --data-dir .coldrun-demo local --sql "SELECT COUNT(*) FROM hits"  # after first load
 ```
 
-## Full dataset
+## Full dataset (optional)
+
+Only needed for real ~100M-row benchmarks or ClickBench leaderboard work (~15 GB `hits.parquet`). Skip this on a laptop unless you explicitly want it.
 
 ```bash
 curl -LO https://datasets.clickhouse.com/hits_compatible/hits.parquet
 ./scripts/repro-local.sh hits.parquet
 ```
 
-Or:
+Or load your own copy from another machine / cloud VM:
 
 ```bash
-coldrun local --load hits.parquet
+coldrun local --load /path/to/hits.parquet
 coldrun local --sql "SELECT COUNT(*) FROM hits"
 ```
 

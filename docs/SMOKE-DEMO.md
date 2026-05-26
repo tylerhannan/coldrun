@@ -1,6 +1,8 @@
 # Smoke demo
 
-Fast local check that Coldrun builds and runs [ClickBench](https://benchmark.clickhouse.com/) queries **1–15** on synthetic `hits` data. No Parquet download (~15 GB) required.
+Fast local check that Coldrun builds and runs [ClickBench](https://benchmark.clickhouse.com/) queries **1–15** on synthetic `hits` data.
+
+**You do not need `hits.parquet` on this machine.** The full ClickBench file is ~15 GB; use these scripts for everyday development. Reserve the real dataset for a cloud box or when you care about benchmark scores.
 
 For all **43** queries (pass/fail report), use [`scripts/smoke-all.sh`](../scripts/smoke-all.sh).
 
