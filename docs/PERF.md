@@ -60,6 +60,7 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | overnight 4–11 | Q27/Q29 fast paths, sparse masks, mmap, rayon load, bench-all, CI |
 | batch 2 (12–17) | bench-all baseline, memchr LIKE, IN-list, Q7 min/max, ahash, README/CI badge |
 | batch 3 (18–21) | Referer GROUP BY, 4-key int GROUP BY, HAVING shortcut, harness README, bench-compare |
+| Q1–Q43 pass | Utf8 GROUP BY, top-K alias fix, Q19 minute extract, Q20 eq scan — see [`perf/`](perf/) |
 
 ## Next (planned)
 
