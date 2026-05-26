@@ -90,17 +90,19 @@ docs/ARCHITECTURE.md
 docs/SMOKE-DEMO.md     # quick local smoke test (scripts/smoke-demo.sh)
 ```
 
-## Goals (toy scope)
+## In scope (toy)
 
 - Load the ClickBench `hits` dataset (~100M rows)
 - Run standard SQL analytical queries
 - Optionally pursue ClickBench leaderboard numbers — treated as a learning exercise, not a product promise
 
-## Non-goals
+## Out of scope
+
+This is a learning exercise, not a product. We are not building:
 
 - Production reliability, HA, or full SQL standard coverage
-- Replacing ClickHouse, DuckDB, or any real OLAP system
-- Being taken seriously
+- A replacement for ClickHouse, DuckDB, or any real OLAP system
+- Anything you should take seriously
 
 ## License
 
