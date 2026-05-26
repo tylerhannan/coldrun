@@ -119,9 +119,62 @@ fn try_build_mask(table: &Table, expr: &Expr, row_count: usize) -> Result<Option
             pattern,
             ..
         } => try_like_mask(table, inner, pattern, *negated, row_count),
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => try_in_list_mask(table, expr, list, *negated, row_count),
         Expr::Nested(inner) => try_build_mask(table, inner, row_count),
         _ => Ok(None),
     }
+}
+
+fn try_in_list_mask(
+    table: &Table,
+    expr: &Expr,
+    list: &[Expr],
+    negated: bool,
+    row_count: usize,
+) -> Result<Option<Vec<bool>>> {
+    let Some(name) = expr_column_name(expr) else {
+        return Ok(None);
+    };
+    let Ok(col) = table.column(&name) else {
+        return Ok(None);
+    };
+    let mut lits = Vec::new();
+    for e in list {
+        let Expr::Value(v) = e else {
+            return Ok(None);
+        };
+        lits.push(value_as_i64(v)?);
+    }
+    let mut mask: Vec<bool> = match col {
+        ColumnData::Int16(v) => {
+            let set: ahash::AHashSet<i16> = lits.iter().map(|&n| n as i16).collect();
+            v.iter()
+                .take(row_count)
+                .map(|&x| set.contains(&x) ^ negated)
+                .collect()
+        }
+        ColumnData::Int32(v) => {
+            let set: ahash::AHashSet<i32> = lits.iter().map(|&n| n as i32).collect();
+            v.iter()
+                .take(row_count)
+                .map(|&x| set.contains(&x) ^ negated)
+                .collect()
+        }
+        ColumnData::Int64(v) => {
+            let set: ahash::AHashSet<i64> = lits.iter().copied().collect();
+            v.iter()
+                .take(row_count)
+                .map(|&x| set.contains(&x) ^ negated)
+                .collect()
+        }
+        _ => return Ok(None),
+    };
+    mask.resize(row_count, false);
+    Ok(Some(mask))
 }
 
 fn try_cmp_mask(
