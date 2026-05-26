@@ -18,9 +18,3 @@ pub fn build_filter_mask(
     }
     Ok(mask)
 }
-
-pub fn eval_having_bool(table: &Table, expr: &Expr, row: usize, mask: &[bool]) -> Result<bool> {
-    // HAVING is evaluated on grouped data; for simple COUNT(*) > N we special-case via group module.
-    let _ = (table, expr, row, mask);
-    Err(crate::Error::msg("HAVING eval not in filter"))
-}

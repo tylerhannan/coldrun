@@ -113,12 +113,12 @@ pub fn eval_bool(table: &Table, expr: &Expr, row: usize) -> Result<bool> {
         Expr::BinaryOp { left, op, right } => match op {
             BinaryOperator::And => Ok(eval_bool(table, left, row)? && eval_bool(table, right, row)?),
             BinaryOperator::Or => Ok(eval_bool(table, left, row)? || eval_bool(table, right, row)?),
-            BinaryOperator::Eq => Ok(eval_cmp(table, left, right, row, |a, b| a == b)?),
-            BinaryOperator::NotEq => Ok(eval_cmp(table, left, right, row, |a, b| a != b)?),
-            BinaryOperator::Gt => Ok(eval_cmp(table, left, right, row, |a, b| a > b)?),
-            BinaryOperator::GtEq => Ok(eval_cmp(table, left, right, row, |a, b| a >= b)?),
-            BinaryOperator::Lt => Ok(eval_cmp(table, left, right, row, |a, b| a < b)?),
-            BinaryOperator::LtEq => Ok(eval_cmp(table, left, right, row, |a, b| a <= b)?),
+            BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Gt
+            | BinaryOperator::GtEq
+            | BinaryOperator::Lt
+            | BinaryOperator::LtEq => Ok(eval_cmp(table, left, right, row, op)?),
             _ => Err(crate::Error::msg(format!("unsupported bool op {op}"))),
         },
         Expr::Like {
@@ -203,21 +203,78 @@ pub fn eval_like_match(haystack: &str, pattern: &str) -> bool {
     haystack == pattern
 }
 
-fn eval_cmp<F>(table: &Table, left: &Expr, right: &Expr, row: usize, f: F) -> Result<bool>
-where
-    F: Fn(i64, i64) -> bool,
-{
+fn eval_cmp(
+    table: &Table,
+    left: &Expr,
+    right: &Expr,
+    row: usize,
+    op: &BinaryOperator,
+) -> Result<bool> {
     if let (Some(lname), Expr::Value(rv)) = (expr_column_name(left), right) {
         let col = table.column(&lname)?;
         if is_date_string(rv) {
             let lit = parse_date_lit(value_as_str(rv)?)?;
-            return Ok(f(col_i64_at(col, row), lit as i64));
+            return cmp_i64(col_i64_at(col, row), lit as i64, op);
+        }
+        if is_string_value(rv) {
+            let lit = value_to_string(rv)?;
+            return cmp_str(&col_compare_str(col, row), &lit, op);
         }
         if let Ok(lit) = value_to_i64(rv) {
-            return Ok(f(col_i64_at(col, row), lit));
+            return cmp_i64(col_i64_at(col, row), lit, op);
         }
     }
-    Ok(f(eval_i64(table, left, row)?, eval_i64(table, right, row)?))
+    if let (Expr::Value(rv), Some(rname)) = (left, expr_column_name(right)) {
+        let col = table.column(&rname)?;
+        if is_date_string(rv) {
+            let lit = parse_date_lit(value_as_str(rv)?)?;
+            return cmp_i64(lit as i64, col_i64_at(col, row), op);
+        }
+        if is_string_value(rv) {
+            let lit = value_to_string(rv)?;
+            return cmp_str(&lit, &col_compare_str(col, row), op);
+        }
+        if let Ok(lit) = value_to_i64(rv) {
+            return cmp_i64(lit, col_i64_at(col, row), op);
+        }
+    }
+    if matches!(*op, BinaryOperator::Eq | BinaryOperator::NotEq) {
+        if let (Ok(l), Ok(r)) = (eval_string(table, left, row), eval_string(table, right, row)) {
+            return cmp_str(&l, &r, op);
+        }
+    }
+    cmp_i64(eval_i64(table, left, row)?, eval_i64(table, right, row)?, op)
+}
+
+fn cmp_i64(left: i64, right: i64, op: &BinaryOperator) -> Result<bool> {
+    Ok(match *op {
+        BinaryOperator::Eq => left == right,
+        BinaryOperator::NotEq => left != right,
+        BinaryOperator::Gt => left > right,
+        BinaryOperator::GtEq => left >= right,
+        BinaryOperator::Lt => left < right,
+        BinaryOperator::LtEq => left <= right,
+        _ => return Err(crate::Error::msg(format!("unsupported compare op {op}"))),
+    })
+}
+
+fn cmp_str(left: &str, right: &str, op: &BinaryOperator) -> Result<bool> {
+    Ok(match *op {
+        BinaryOperator::Eq => left == right,
+        BinaryOperator::NotEq => left != right,
+        BinaryOperator::Gt => left > right,
+        BinaryOperator::GtEq => left >= right,
+        BinaryOperator::Lt => left < right,
+        BinaryOperator::LtEq => left <= right,
+        _ => return Err(crate::Error::msg(format!("unsupported compare op {op}"))),
+    })
+}
+
+fn col_compare_str(col: &ColumnData, row: usize) -> String {
+    match col {
+        ColumnData::Utf8(v) => v[row].clone(),
+        _ => col_i64_at(col, row).to_string(),
+    }
 }
 
 fn eval_extract_i64(
@@ -403,5 +460,38 @@ fn col_utf8_at(col: &ColumnData, i: usize) -> &str {
     match col {
         ColumnData::Utf8(v) => v[i].as_str(),
         _ => "",
+    }
+}
+
+fn is_string_value(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::SingleQuotedString(_)
+            | Value::DoubleQuotedString(_)
+            | Value::EscapedStringLiteral(_)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlparser::ast::{Expr, SetExpr, Statement};
+    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::parser::Parser;
+
+    #[test]
+    fn empty_string_literal_is_quoted() {
+        let sql = "SELECT 1 FROM hits WHERE MobilePhoneModel <> ''";
+        let stmts = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap();
+        let Statement::Query(q) = &stmts[0] else { panic!() };
+        let SetExpr::Select(sel) = &*q.body else { panic!() };
+        let Expr::BinaryOp { right, .. } = sel.selection.as_ref().unwrap() else {
+            panic!("no where");
+        };
+        let Expr::Value(v) = right.as_ref() else {
+            panic!("right not value: {right:?}");
+        };
+        assert!(is_string_value(v));
+        assert_eq!(value_to_string(v).unwrap(), "");
     }
 }
