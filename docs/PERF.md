@@ -54,6 +54,9 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | **Multi global agg** | One mask pass for `SUM` + `COUNT(*)` + `AVG` (Q3) |
 | **Global COUNT DISTINCT** | Dedicated fast path for int/utf8 columns (Q5–Q6) |
 | **Column-order scan** | `SELECT col ORDER BY col LIMIT` sorts via row indices (Q25–Q26) |
+| **Utf8 offset sidecar** | `.col.idx` per utf8 column for O(1) `read_cells_at` |
+| **Streaming scan top-K** | Q25/Q26 heap over rows — no full filtered index vector |
+| **Parallel Q24 projection** | `project_rows` loads columns with `rayon` |
 | **Group hash reserve** | Pre-size hash tables from filtered row count |
 | **Q27 scan** | Two-key `ORDER BY EventTime, SearchPhrase` |
 | **Q29 fast path** | 90× `SUM(ResolutionWidth + k)` in one column pass |
@@ -88,12 +91,12 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | pass 7 | Q24 two-phase I/O, near-unique O(limit) GROUP BY, StreamingAggTopK int-pair — [`bench-all-100k-pass7.md`](overnight/bench-all-100k-pass7.md) |
 | pass 8 | Metadata-only COUNT(*), near-unique Q16/Q22/Q23, Q25 partial sort, Q21 LIKE count — [`bench-all-100k-pass8.md`](overnight/bench-all-100k-pass8.md) |
 | pass 9 | Row-indexed Q24 `project_rows`, fused AND filter, zone v2 EventTime — [`bench-all-100k-pass9.md`](overnight/bench-all-100k-pass9.md) |
+| pass 10 | Utf8 `.col.idx` sidecar, parallel `project_rows`, streaming top-K Q25–26 — [`bench-all-100k-pass10.md`](overnight/bench-all-100k-pass10.md) |
 
 ## Next (planned)
 
-1. **Utf8 offset sidecar** — O(1) random row read in column files
-2. **Zone-guided EventTime scan** — ORDER BY LIMIT using v2 zone bounds
-3. **Parallel column projection** — rayon `project_rows` for Q24
+1. **Zone-guided EventTime scan** — ORDER BY LIMIT using v2 zone bounds
+2. **Q6 / Q23 / Q40** — remaining ~7–11ms queries on demo
 
 ## Honest scope
 

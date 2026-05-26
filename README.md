@@ -99,13 +99,12 @@ docs/SMOKE-DEMO.md     # quick local smoke test (scripts/smoke-demo.sh)
 
 ## Next (planned)
 
-Demo @ 100k is **43/43 correct**; **total ~0.10s** for 43 queries (pass 9). Next levers:
+Demo @ 100k is **43/43 correct**; **total ~0.16s** for 43 queries (pass 10). Next levers:
 
-1. **Utf8 offset index sidecar** — O(1) row lookup in `.col` files (skip sequential scan)
-2. **Zone-guided EventTime scan** — use v2 bounds for ORDER BY LIMIT
-3. **Parallel `project_rows`** — rayon over columns on Q24
+1. **Zone-guided EventTime scan** — use v2 bounds for ORDER BY LIMIT
+2. **Q6 / Q23 / Q40** — remaining ~7–11ms queries on demo
 
-Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass9.md`](docs/overnight/bench-all-100k-pass9.md)
+Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass10.md`](docs/overnight/bench-all-100k-pass10.md)
 
 ## Out of scope
 

@@ -184,20 +184,31 @@ impl Table {
         let names: Vec<String> = self.meta.columns.iter().map(|c| c.name.clone()).collect();
         let ncols = names.len();
         let nrows = row_indices.len();
-        let mut rows: Vec<Vec<String>> = (0..nrows).map(|_| Vec::with_capacity(ncols)).collect();
         let col_dir = self.path.join("columns");
 
-        for col_meta in &self.meta.columns {
-            if let Ok(loaded) = self.column(&col_meta.name) {
-                for (out, &r) in rows.iter_mut().zip(row_indices) {
-                    out.push(ColumnData::cell_to_string(loaded, r));
+        use rayon::prelude::*;
+        let cells_by_col: Result<Vec<Vec<String>>> = self
+            .meta
+            .columns
+            .par_iter()
+            .map(|col_meta| {
+                if let Ok(loaded) = self.column(&col_meta.name) {
+                    Ok(row_indices
+                        .iter()
+                        .map(|&r| ColumnData::cell_to_string(loaded, r))
+                        .collect())
+                } else {
+                    let path = col_dir.join(format!("{}.col", col_meta.name));
+                    ColumnData::read_cells_at(&path, row_indices)
                 }
-            } else {
-                let path = col_dir.join(format!("{}.col", col_meta.name));
-                let cells = ColumnData::read_cells_at(&path, row_indices)?;
-                for (out, cell) in rows.iter_mut().zip(cells) {
-                    out.push(cell);
-                }
+            })
+            .collect();
+
+        let cells_by_col = cells_by_col?;
+        let mut rows: Vec<Vec<String>> = (0..nrows).map(|_| Vec::with_capacity(ncols)).collect();
+        for col_cells in cells_by_col {
+            for (out, cell) in rows.iter_mut().zip(col_cells) {
+                out.push(cell);
             }
         }
         Ok((names, rows))

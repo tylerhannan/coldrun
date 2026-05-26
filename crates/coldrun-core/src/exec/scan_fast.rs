@@ -1,5 +1,7 @@
 //! Fast scan for `SELECT col … ORDER BY … LIMIT` (Q25–Q27 pattern).
 
+use std::collections::BinaryHeap;
+
 use sqlparser::ast::{BinaryOperator, Expr, Value};
 
 use crate::expr::eval_like_match;
@@ -68,6 +70,22 @@ fn try_scan_single_order(
         return Ok(None);
     }
 
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(row_count);
+    let need = offset.saturating_add(limit);
+    if need > 0 && need < row_count {
+        if let Some(filter_name) = utf8_ne_empty_column(parsed.where_expr.as_ref()) {
+            if filter_name == sel_name {
+                let col = table.column(sel_name)?;
+                if let ColumnData::Utf8(v) = col {
+                    let indices =
+                        streaming_topk_utf8(v, row_count, need, *desc, |i| !v[i].is_empty());
+                    return Ok(Some(build_scan_result(proj, col, &indices, parsed)?));
+                }
+            }
+        }
+    }
+
     let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
     let col = table.column(sel_name)?;
     let mut indices = select_indices_for_where(table, parsed.where_expr.as_ref(), row_count, &mask)?;
@@ -95,6 +113,29 @@ fn try_scan_order_different_col(
     }
     let order_col = table.column(order_name)?;
     let sel_col = table.column(sel_name)?;
+
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(row_count);
+    let need = offset.saturating_add(limit);
+    if need > 0 && need < row_count {
+        if let Some(filter_name) = utf8_ne_empty_column(parsed.where_expr.as_ref()) {
+            if filter_name == sel_name {
+                if let (ColumnData::Utf8(v), ColumnData::Timestamp(times)) =
+                    (sel_col, order_col)
+                {
+                    let indices = streaming_topk_i64(
+                        row_count,
+                        need,
+                        *desc,
+                        |i| !v[i].is_empty(),
+                        |i| times[i],
+                    );
+                    return Ok(Some(build_scan_result(proj, sel_col, &indices, parsed)?));
+                }
+            }
+        }
+    }
+
     let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
     let mut indices = select_indices_for_where(table, parsed.where_expr.as_ref(), row_count, &mask)?;
     partial_or_full_sort_indices(order_col, &mut indices, parsed, *desc);
@@ -505,4 +546,79 @@ fn cmp_at(col: &ColumnData, a: usize, b: usize, desc: bool) -> std::cmp::Orderin
     } else {
         ord
     }
+}
+
+/// Keep the best `need` row indices by i64 key without materializing the full filtered set.
+fn streaming_topk_i64(
+    row_count: usize,
+    need: usize,
+    desc: bool,
+    row_ok: impl Fn(usize) -> bool,
+    key_at: impl Fn(usize) -> i64,
+) -> Vec<usize> {
+    if need == 0 {
+        return Vec::new();
+    }
+    let mut heap: BinaryHeap<(i64, usize)> = BinaryHeap::new();
+    for i in 0..row_count {
+        if !row_ok(i) {
+            continue;
+        }
+        let k = key_at(i);
+        if heap.len() < need {
+            heap.push((k, i));
+        } else if let Some(&(worst_k, _)) = heap.peek() {
+            let replace = if desc { k > worst_k } else { k < worst_k };
+            if replace {
+                heap.pop();
+                heap.push((k, i));
+            }
+        }
+    }
+    let mut v: Vec<_> = heap.into_iter().collect();
+    if desc {
+        v.sort_by(|a, b| b.0.cmp(&a.0));
+    } else {
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    v.into_iter().map(|(_, i)| i).collect()
+}
+
+/// Keep the best `need` row indices by utf8 key without materializing the full filtered set.
+fn streaming_topk_utf8(
+    v: &[String],
+    row_count: usize,
+    need: usize,
+    desc: bool,
+    row_ok: impl Fn(usize) -> bool,
+) -> Vec<usize> {
+    if need == 0 {
+        return Vec::new();
+    }
+    let mut heap: BinaryHeap<(usize, usize)> = BinaryHeap::new();
+    for i in 0..row_count {
+        if !row_ok(i) {
+            continue;
+        }
+        if heap.len() < need {
+            heap.push((i, i));
+        } else if let Some(&(worst_idx, _)) = heap.peek() {
+            let ord = if desc {
+                v[i].cmp(&v[worst_idx])
+            } else {
+                v[worst_idx].cmp(&v[i])
+            };
+            if ord == std::cmp::Ordering::Greater {
+                heap.pop();
+                heap.push((i, i));
+            }
+        }
+    }
+    let mut indices: Vec<usize> = heap.into_iter().map(|(_, i)| i).collect();
+    if desc {
+        indices.sort_by(|&a, &b| v[b].cmp(&v[a]));
+    } else {
+        indices.sort_by(|&a, &b| v[a].cmp(&v[b]));
+    }
+    indices
 }

@@ -9,6 +9,7 @@ use super::pod::PodStorage;
 use crate::Result;
 
 const MAGIC: &[u8; 4] = b"CRUN";
+const IDX_MAGIC: &[u8; 4] = b"CRUI";
 const FORMAT_V1: u8 = 1;
 const ENC_RAW: u8 = 0;
 const ENC_LZ4: u8 = 1;
@@ -127,12 +128,17 @@ impl ColumnData {
             ColumnData::Date(v) => write_pod_vec(&mut raw, v),
             ColumnData::Timestamp(v) => write_pod_vec(&mut raw, v),
             ColumnData::Utf8(v) => {
+                let mut offsets = Vec::with_capacity(v.len());
+                let mut pos = 0usize;
                 for s in v {
+                    offsets.push(pos as u32);
                     let bytes = s.as_bytes();
                     let len = bytes.len() as u32;
                     raw.extend_from_slice(&len.to_le_bytes());
                     raw.extend_from_slice(bytes);
+                    pos += 4 + bytes.len();
                 }
+                write_utf8_idx_sidecar(path, &offsets)?;
             }
         }
         let payload = if raw.len() > 4096 {
@@ -171,7 +177,12 @@ impl ColumnData {
             return Ok(Vec::new());
         }
         let (col_type, payload) = open_column_payload(path)?;
-        decode_cells_at(&payload, col_type, rows)
+        let utf8_offsets = if col_type == ColumnType::Utf8 {
+            read_utf8_offsets(path)
+        } else {
+            None
+        };
+        decode_cells_at(&payload, col_type, rows, utf8_offsets.as_deref())
     }
 
     pub fn cell_to_string(col: &ColumnData, row: usize) -> String {
@@ -251,7 +262,12 @@ fn decode_column_payload_typed(payload: &[u8], col_type: ColumnType) -> Result<C
     })
 }
 
-fn decode_cells_at(payload: &[u8], col_type: ColumnType, rows: &[usize]) -> Result<Vec<String>> {
+fn decode_cells_at(
+    payload: &[u8],
+    col_type: ColumnType,
+    rows: &[usize],
+    utf8_offsets: Option<&[u32]>,
+) -> Result<Vec<String>> {
     if payload.len() < 8 {
         return Err(crate::Error::msg("column payload truncated"));
     }
@@ -262,19 +278,31 @@ fn decode_cells_at(payload: &[u8], col_type: ColumnType, rows: &[usize]) -> Resu
             if row >= count {
                 return Err(crate::Error::msg("row index out of range"));
             }
-            format_cell_at(body, col_type, row, count)
+            format_cell_at(body, col_type, row, count, utf8_offsets)
         })
         .collect()
 }
 
-fn format_cell_at(body: &[u8], col_type: ColumnType, row: usize, count: usize) -> Result<String> {
+fn format_cell_at(
+    body: &[u8],
+    col_type: ColumnType,
+    row: usize,
+    count: usize,
+    utf8_offsets: Option<&[u32]>,
+) -> Result<String> {
     Ok(match col_type {
         ColumnType::Int64 => read_pod_at::<i64>(body, row)?.to_string(),
         ColumnType::Int32 => read_pod_at::<i32>(body, row)?.to_string(),
         ColumnType::Int16 => read_pod_at::<i16>(body, row)?.to_string(),
         ColumnType::Date => read_pod_at::<i32>(body, row)?.to_string(),
         ColumnType::Timestamp => read_pod_at::<i64>(body, row)?.to_string(),
-        ColumnType::Utf8 => read_utf8_at(body, row, count)?,
+        ColumnType::Utf8 => {
+            if let Some(offsets) = utf8_offsets {
+                read_utf8_at_offset(body, offsets, row)?
+            } else {
+                read_utf8_at(body, row, count)?
+            }
+        }
     })
 }
 
@@ -319,6 +347,61 @@ fn read_utf8_vec(body: &[u8], count: usize) -> Result<Vec<String>> {
         pos += len;
     }
     Ok(strings)
+}
+
+fn utf8_idx_path(col_path: &Path) -> std::path::PathBuf {
+    let mut p = col_path.as_os_str().to_os_string();
+    p.push(".idx");
+    std::path::PathBuf::from(p)
+}
+
+fn write_utf8_idx_sidecar(col_path: &Path, offsets: &[u32]) -> Result<()> {
+    let path = utf8_idx_path(col_path);
+    let mut out = Vec::with_capacity(4 + 1 + 8 + offsets.len() * 4);
+    out.extend_from_slice(IDX_MAGIC);
+    out.push(FORMAT_V1);
+    out.extend_from_slice(&(offsets.len() as u64).to_le_bytes());
+    for &off in offsets {
+        out.extend_from_slice(&off.to_le_bytes());
+    }
+    let mut f = File::create(path)?;
+    f.write_all(&out)?;
+    Ok(())
+}
+
+fn read_utf8_offsets(col_path: &Path) -> Option<Vec<u32>> {
+    let path = utf8_idx_path(col_path);
+    let mut f = File::open(path).ok()?;
+    let mut header = [0u8; 13];
+    f.read_exact(&mut header).ok()?;
+    if &header[..4] != IDX_MAGIC || header[4] != FORMAT_V1 {
+        return None;
+    }
+    let count = u64::from_le_bytes(header[5..13].try_into().ok()?) as usize;
+    let mut bytes = vec![0u8; count * 4];
+    f.read_exact(&mut bytes).ok()?;
+    Some(
+        bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect(),
+    )
+}
+
+fn read_utf8_at_offset(body: &[u8], offsets: &[u32], row: usize) -> Result<String> {
+    let mut pos = *offsets
+        .get(row)
+        .ok_or_else(|| crate::Error::msg("row index out of range"))? as usize;
+    if pos + 4 > body.len() {
+        return Err(crate::Error::msg("utf8 payload truncated"));
+    }
+    let len = u32::from_le_bytes(body[pos..pos + 4].try_into().unwrap()) as usize;
+    pos += 4;
+    if pos + len > body.len() {
+        return Err(crate::Error::msg("utf8 payload truncated"));
+    }
+    String::from_utf8(body[pos..pos + len].to_vec())
+        .map_err(|e| crate::Error::msg(format!("invalid utf8 in column: {e}")))
 }
 
 fn read_utf8_at(body: &[u8], mut row: usize, count: usize) -> Result<String> {
