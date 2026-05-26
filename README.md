@@ -16,7 +16,7 @@ Coldrun is the database under test. It does not run ClickBench for other systems
 |------|--------|--------|
 | 1. Architecture doc | Done | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | 2. MVP: load `hits`, queries 1–5 | Done | demo + Parquet (dynamic schema) |
-| 3. All 43 queries correct | In progress | Q1–10 on demo; GROUP BY / ORDER BY / LIMIT |
+| 3. All 43 queries correct | Done (demo) | All 43 pass on synthetic data via `./scripts/smoke-all.sh` |
 | 4. Optimize Combined score | Not started | PK zones, vectorization, compression |
 | 5. ClickBench PR | Not started | [`clickbench/coldrun/`](clickbench/coldrun/) harness |
 
@@ -34,7 +34,7 @@ cargo build --release -p coldrun-cli
 
 ## Quick smoke (no download)
 
-Synthetic ~10k rows, runs ClickBench queries 1–10. Full details: [`docs/SMOKE-DEMO.md`](docs/SMOKE-DEMO.md).
+Synthetic ~10k rows, runs ClickBench queries 1–15. Full details: [`docs/SMOKE-DEMO.md`](docs/SMOKE-DEMO.md). All 43: `./scripts/smoke-all.sh`.
 
 ```bash
 ./scripts/smoke-demo.sh
