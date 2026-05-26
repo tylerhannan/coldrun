@@ -1,6 +1,8 @@
 # Smoke demo
 
-Fast local check that Coldrun builds and runs [ClickBench](https://benchmark.clickhouse.com/) queries **1–10** on synthetic `hits` data. No Parquet download (~15 GB) required.
+Fast local check that Coldrun builds and runs [ClickBench](https://benchmark.clickhouse.com/) queries **1–15** on synthetic `hits` data. No Parquet download (~15 GB) required.
+
+For all **43** queries (pass/fail report), use [`scripts/smoke-all.sh`](../scripts/smoke-all.sh).
 
 ## Prerequisites
 
@@ -36,14 +38,14 @@ COLDRUN_DATA=/tmp/coldrun-demo ./scripts/smoke-demo.sh
 1. `cargo build --release -p coldrun-cli` → `target/release/coldrun`
 2. Removes and recreates the data dir (default `.coldrun-demo/`)
 3. Loads synthetic `hits` rows: `coldrun local --demo <rows>`
-4. Runs queries 1–10 from [`clickbench/coldrun/queries.sql`](../clickbench/coldrun/queries.sql), printing the last few lines of each run (result + timing)
+4. Runs queries 1–15 from [`clickbench/coldrun/queries.sql`](../clickbench/coldrun/queries.sql), printing the last few lines of each run (result + timing)
 
 First run may take a minute while dependencies compile; later runs are much faster.
 
 ## Example output
 
 ```
-=== ClickBench queries 1–10 (demo, 10000 rows) ===
+=== ClickBench queries 1–15 (demo, 10000 rows) ===
 >> Q1: SELECT COUNT(*) FROM hits;
 count()
 10000
@@ -77,4 +79,4 @@ export PATH="$PWD/target/release:$PATH"   # or use ./target/release/coldrun dire
 |---------|-----|
 | `cargo: command not found` | `source "$HOME/.cargo/env"` or open a new terminal after `rustup` install |
 | Permission denied on script | `chmod +x scripts/smoke-demo.sh` (should already be executable in git) |
-| Query errors on Q11+ | Expected on demo; only 1–10 are in scope for this script |
+| Query errors on Q16+ in smoke-demo | Use `smoke-all.sh` for the full query set |
