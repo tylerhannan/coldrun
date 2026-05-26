@@ -17,7 +17,7 @@ Coldrun is the database under test. It does not run ClickBench for other systems
 | 1. Architecture doc | Done | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | 2. MVP: load `hits`, queries 1–5 | Done | demo + Parquet (dynamic schema) |
 | 3. All 43 queries correct | Done (demo) | All 43 pass on synthetic data via `./scripts/smoke-all.sh` |
-| 4. Optimize Combined score | Not started | PK zones, vectorization, compression |
+| 4. Optimize Combined score | In progress | Column pruning, vectorized filters, LZ4; see [`docs/PERF.md`](docs/PERF.md) |
 | 5. ClickBench PR | Not started | [`clickbench/coldrun/`](clickbench/coldrun/) harness |
 
 ## Prerequisites

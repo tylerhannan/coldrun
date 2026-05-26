@@ -1,6 +1,7 @@
 /target/
 .coldrun/
 .coldrun-demo/
+.coldrun-bench/
 clickbench/coldrun/.clickbench/
 smoke-all.log
 hits.parquet

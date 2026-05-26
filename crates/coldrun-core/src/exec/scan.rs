@@ -1,16 +1,15 @@
 use sqlparser::ast::Expr;
 
 use crate::expr::{eval_i64, eval_string};
-use crate::sql::{parse_query, projection_label, SelectItemKind};
+use crate::sql::{projection_label, ParsedQuery, SelectItemKind};
 use crate::storage::Database;
 use crate::Result;
 
 use super::filter::build_filter_mask;
 use super::QueryResult;
 
-pub fn execute_scan(db: &Database, sql: &str) -> Result<QueryResult> {
-    let parsed = parse_query(sql)?;
-    let table = db.open_table("hits")?;
+pub fn execute_scan(db: &Database, parsed: &ParsedQuery) -> Result<QueryResult> {
+    let table = db.open_table_for_query("hits", parsed)?;
     let row_count = table.row_count() as usize;
     let mask = build_filter_mask(&table, parsed.where_expr.as_ref(), row_count)?;
 

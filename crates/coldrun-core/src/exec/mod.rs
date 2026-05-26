@@ -1,5 +1,7 @@
 mod aggregate;
+mod fast_agg;
 mod filter;
+mod filter_fast;
 mod group;
 mod scan;
 
@@ -12,6 +14,7 @@ pub use group::execute_grouped;
 pub use scan::execute_scan;
 
 use aggregate::eval_global_select;
+use fast_agg::try_execute_global;
 use filter::build_filter_mask;
 
 #[derive(Debug, Clone)]
@@ -41,7 +44,7 @@ pub fn execute(db: &Database, sql: &str) -> Result<QueryResult> {
     }
 
     if !parsed.group_by.is_empty() {
-        return group::execute_grouped(db, sql);
+        return group::execute_grouped(db, &parsed);
     }
 
     let is_scan = parsed.select_all
@@ -54,11 +57,16 @@ pub fn execute(db: &Database, sql: &str) -> Result<QueryResult> {
             .any(|p| matches!(p.kind, crate::sql::SelectItemKind::Column(_) | crate::sql::SelectItemKind::Other(_)));
 
     if is_scan {
-        return scan::execute_scan(db, sql);
+        return scan::execute_scan(db, &parsed);
     }
 
-    let table = db.open_table("hits")?;
+    let table = db.open_table_for_query("hits", &parsed)?;
     let row_count = table.row_count() as usize;
+
+    if let Some(result) = try_execute_global(&table, &parsed, row_count)? {
+        return Ok(result);
+    }
+
     let mask = build_filter_mask(&table, parsed.where_expr.as_ref(), row_count)?;
 
     let mut columns = Vec::new();

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::sql::ParsedQuery;
 use crate::{Error, Result};
 
 const MANIFEST: &str = "manifest.json";
@@ -65,6 +66,15 @@ impl Database {
             return Err(Error::msg(format!("table '{name}' does not exist")));
         }
         Table::open(self.table_path(name))
+    }
+
+    /// Open a table loading only columns referenced by the parsed query.
+    pub fn open_table_for_query(&self, name: &str, parsed: &ParsedQuery) -> Result<Table> {
+        if !self.has_table(name) {
+            return Err(Error::msg(format!("table '{name}' does not exist")));
+        }
+        let cols = crate::sql::referenced_columns(parsed);
+        Table::open_columns(self.table_path(name), cols.as_ref())
     }
 
     pub fn register_table(&mut self, name: &str) -> Result<()> {

@@ -47,10 +47,23 @@ impl Table {
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_columns(path, None)
+    }
+
+    /// Load only the listed columns (plus metadata). `None` loads every column file.
+    pub fn open_columns(
+        path: impl AsRef<Path>,
+        only: Option<&std::collections::HashSet<String>>,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let meta: TableMeta = serde_json::from_str(&std::fs::read_to_string(path.join(META))?)?;
         let mut columns = HashMap::new();
         for col in &meta.columns {
+            if let Some(set) = only {
+                if !set.contains(&col.name) {
+                    continue;
+                }
+            }
             let col_path = path.join("columns").join(format!("{}.col", col.name));
             if col_path.exists() {
                 columns.insert(col.name.clone(), ColumnData::read_file(&col_path)?);

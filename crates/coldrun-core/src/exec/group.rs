@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use sqlparser::ast::Expr;
 
 use crate::expr::{eval_group_key, eval_i64, eval_string};
-use crate::sql::{parse_query, projection_label, SelectItemKind, SelectProjection};
+use crate::sql::{projection_label, ParsedQuery, SelectItemKind, SelectProjection};
 use crate::storage::Database;
 use crate::Result;
 
@@ -16,9 +16,8 @@ struct GroupBucket {
     sample_row: usize,
 }
 
-pub fn execute_grouped(db: &Database, sql: &str) -> Result<QueryResult> {
-    let parsed = parse_query(sql)?;
-    let table = db.open_table("hits")?;
+pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResult> {
+    let table = db.open_table_for_query("hits", parsed)?;
     let row_count = table.row_count() as usize;
     let mask = build_filter_mask(&table, parsed.where_expr.as_ref(), row_count)?;
 

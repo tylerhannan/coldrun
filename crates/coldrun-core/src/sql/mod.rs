@@ -1,3 +1,7 @@
+mod columns;
+
+pub use columns::{referenced_columns, referenced_columns_for_sql};
+
 use sqlparser::ast::{
     DuplicateTreatment, Expr, Function, FunctionArg, FunctionArguments,
     GroupByExpr, OrderBy, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins,

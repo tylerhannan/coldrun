@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 
 const MAGIC: &[u8; 4] = b"CRUN";
+const FORMAT_V1: u8 = 1;
+const ENC_RAW: u8 = 0;
+const ENC_LZ4: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColumnType {
@@ -93,28 +96,47 @@ impl ColumnData {
     }
 
     pub fn write_file(&self, path: &Path) -> Result<()> {
-        let mut f = File::create(path)?;
-        f.write_all(MAGIC)?;
-        let col_type = self.column_type() as u8;
-        f.write_all(&[col_type])?;
+        let mut raw = Vec::new();
         let count = self.len() as u64;
-        f.write_all(&count.to_le_bytes())?;
+        raw.extend_from_slice(&count.to_le_bytes());
         match self {
-            ColumnData::Int64(v) => write_pod_slice(&mut f, v),
-            ColumnData::Int32(v) => write_pod_slice(&mut f, v),
-            ColumnData::Int16(v) => write_pod_slice(&mut f, v),
-            ColumnData::Date(v) => write_pod_slice(&mut f, v),
-            ColumnData::Timestamp(v) => write_pod_slice(&mut f, v),
+            ColumnData::Int64(v) => write_pod_vec(&mut raw, v),
+            ColumnData::Int32(v) => write_pod_vec(&mut raw, v),
+            ColumnData::Int16(v) => write_pod_vec(&mut raw, v),
+            ColumnData::Date(v) => write_pod_vec(&mut raw, v),
+            ColumnData::Timestamp(v) => write_pod_vec(&mut raw, v),
             ColumnData::Utf8(v) => {
                 for s in v {
                     let bytes = s.as_bytes();
                     let len = bytes.len() as u32;
-                    f.write_all(&len.to_le_bytes())?;
-                    f.write_all(bytes)?;
+                    raw.extend_from_slice(&len.to_le_bytes());
+                    raw.extend_from_slice(bytes);
                 }
-                Ok(())
             }
         }
+        let payload = if raw.len() > 4096 {
+            lz4_flex::compress_prepend_size(&raw)
+        } else {
+            raw.clone()
+        };
+        let encoding = if payload.len() < raw.len() {
+            ENC_LZ4
+        } else {
+            ENC_RAW
+        };
+        let body = if encoding == ENC_LZ4 {
+            &payload
+        } else {
+            &raw
+        };
+
+        let mut f = File::create(path)?;
+        f.write_all(MAGIC)?;
+        f.write_all(&[FORMAT_V1])?;
+        f.write_all(&[self.column_type() as u8])?;
+        f.write_all(&[encoding])?;
+        f.write_all(body)?;
+        Ok(())
     }
 
     pub fn read_file(path: &Path) -> Result<Self> {
@@ -124,34 +146,45 @@ impl ColumnData {
         if &magic != MAGIC {
             return Err(crate::Error::msg("invalid column file magic"));
         }
-        let mut type_byte = [0u8; 1];
-        f.read_exact(&mut type_byte)?;
-        let col_type = match type_byte[0] {
-            0 => ColumnType::Int64,
-            1 => ColumnType::Int32,
-            2 => ColumnType::Int16,
-            3 => ColumnType::Utf8,
-            4 => ColumnType::Date,
-            5 => ColumnType::Timestamp,
-            n => return Err(crate::Error::msg(format!("unknown column type tag {n}"))),
+        let mut first = [0u8; 1];
+        f.read_exact(&mut first)?;
+        let (col_type, encoding, mut payload) = if first[0] == FORMAT_V1 {
+            let mut type_byte = [0u8; 1];
+            f.read_exact(&mut type_byte)?;
+            let mut enc_byte = [0u8; 1];
+            f.read_exact(&mut enc_byte)?;
+            let mut rest = Vec::new();
+            f.read_to_end(&mut rest)?;
+            (parse_col_type(type_byte[0])?, enc_byte[0], rest)
+        } else {
+            let mut rest = Vec::new();
+            f.read_to_end(&mut rest)?;
+            (parse_col_type(first[0])?, ENC_RAW, rest)
         };
+
+        if encoding == ENC_LZ4 {
+            payload = lz4_flex::decompress_size_prepended(&payload)
+                .map_err(|e| crate::Error::msg(format!("lz4 decompress: {e}")))?;
+        }
+
+        let mut cursor = std::io::Cursor::new(payload);
         let mut count_buf = [0u8; 8];
-        f.read_exact(&mut count_buf)?;
+        std::io::Read::read_exact(&mut cursor, &mut count_buf)?;
         let count = u64::from_le_bytes(count_buf) as usize;
         Ok(match col_type {
-            ColumnType::Int64 => ColumnData::Int64(read_pod_slice(&mut f, count)?),
-            ColumnType::Int32 => ColumnData::Int32(read_pod_slice(&mut f, count)?),
-            ColumnType::Int16 => ColumnData::Int16(read_pod_slice(&mut f, count)?),
-            ColumnType::Date => ColumnData::Date(read_pod_slice(&mut f, count)?),
-            ColumnType::Timestamp => ColumnData::Timestamp(read_pod_slice(&mut f, count)?),
+            ColumnType::Int64 => ColumnData::Int64(read_pod_cursor(&mut cursor, count)?),
+            ColumnType::Int32 => ColumnData::Int32(read_pod_cursor(&mut cursor, count)?),
+            ColumnType::Int16 => ColumnData::Int16(read_pod_cursor(&mut cursor, count)?),
+            ColumnType::Date => ColumnData::Date(read_pod_cursor(&mut cursor, count)?),
+            ColumnType::Timestamp => ColumnData::Timestamp(read_pod_cursor(&mut cursor, count)?),
             ColumnType::Utf8 => {
                 let mut strings = Vec::with_capacity(count);
                 for _ in 0..count {
                     let mut len_buf = [0u8; 4];
-                    f.read_exact(&mut len_buf)?;
+                    std::io::Read::read_exact(&mut cursor, &mut len_buf)?;
                     let len = u32::from_le_bytes(len_buf) as usize;
                     let mut bytes = vec![0u8; len];
-                    f.read_exact(&mut bytes)?;
+                    std::io::Read::read_exact(&mut cursor, &mut bytes)?;
                     strings.push(String::from_utf8(bytes).map_err(|e| {
                         crate::Error::msg(format!("invalid utf8 in column: {e}"))
                     })?);
@@ -162,22 +195,37 @@ impl ColumnData {
     }
 }
 
-fn write_pod_slice<T: Copy>(f: &mut File, data: &[T]) -> Result<()> {
-    let bytes =
-        unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * size_of::<T>()) };
-    f.write_all(bytes)?;
-    Ok(())
+fn parse_col_type(tag: u8) -> Result<ColumnType> {
+    Ok(match tag {
+        0 => ColumnType::Int64,
+        1 => ColumnType::Int32,
+        2 => ColumnType::Int16,
+        3 => ColumnType::Utf8,
+        4 => ColumnType::Date,
+        5 => ColumnType::Timestamp,
+        n => return Err(crate::Error::msg(format!("unknown column type tag {n}"))),
+    })
 }
 
-fn read_pod_slice<T: Copy>(f: &mut File, count: usize) -> Result<Vec<T>> {
+fn write_pod_vec<T: Copy>(out: &mut Vec<u8>, data: &[T]) {
+    let bytes =
+        unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * size_of::<T>()) };
+    out.extend_from_slice(bytes);
+}
+
+fn read_pod_cursor<T: Copy>(cursor: &mut std::io::Cursor<Vec<u8>>, count: usize) -> Result<Vec<T>> {
     let byte_len = count * size_of::<T>();
-    let mut bytes = vec![0u8; byte_len];
-    f.read_exact(&mut bytes)?;
+    let pos = cursor.position() as usize;
+    let buf = cursor.get_ref();
+    if pos + byte_len > buf.len() {
+        return Err(crate::Error::msg("column payload truncated"));
+    }
     let mut out = Vec::with_capacity(count);
     unsafe {
-        let ptr = bytes.as_ptr() as *const T;
+        let ptr = buf.as_ptr().add(pos) as *const T;
         out.extend_from_slice(std::slice::from_raw_parts(ptr, count));
     }
+    cursor.set_position((pos + byte_len) as u64);
     Ok(out)
 }
 
