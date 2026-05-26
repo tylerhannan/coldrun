@@ -99,16 +99,15 @@ docs/SMOKE-DEMO.md     # quick local smoke test (scripts/smoke-demo.sh)
 
 ## Next (planned)
 
-Demo @ 100k is **43/43 correct**; slowest queries are still **~90–130ms** (Q19, Q36, Q35). Planned work:
+Demo @ 100k is **43/43 correct**; **total ~0.72s** for 43 queries (pass 3). Slowest: **Q19 ~175ms**, **Q36 ~118ms**, **Q35 ~87ms** (demo data is nearly unique per row on those keys). Planned work:
 
-1. **Streaming top-K during GROUP BY** — never materialize all groups when `ORDER BY count LIMIT 10` (heap helps at finish; still hash every row)
-2. **Q19 / Q36 hot paths** — triple-key and 4-key groups on real `hits` cardinality (demo data is nearly unique per row, which inflates hash cost)
-3. **String GROUP BY without interpreter** — Q35 `GROUP BY 1, URL`, Q40 `CASE` keys, multi-utf8 MIN/aggregate shapes
-4. **mmap zero-copy numerics** — keep `Arc<[T]>` column buffers after decode (avoid copy on read)
-5. **Cloud baseline** — full `hits.parquet` on `c6a.4xlarge` via [`clickbench/coldrun/`](clickbench/coldrun/); publish Combined-oriented numbers
-6. **ClickBench PR** — wire harness polish + cold-run repro (build step 5)
+1. **Q19 / Q36 / Q35** — streaming top-K or column-order grouping on high-cardinality keys (real `hits` has duplicates; demo does not)
+2. **String / CASE GROUP BY** — Q40 `CASE` keys without per-row interpreter
+3. **mmap zero-copy numerics** — keep `Arc<[T]>` column buffers after decode
+4. **Cloud baseline** — full `hits.parquet` on `c6a.4xlarge` via [`clickbench/coldrun/`](clickbench/coldrun/)
+5. **ClickBench PR** — Combined score vs ClickHouse (demo timings are regression-only)
 
-Per-query adversarial notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass2.md`](docs/overnight/bench-all-100k-pass2.md)
+Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass3.md`](docs/overnight/bench-all-100k-pass3.md)
 
 ## Out of scope
 

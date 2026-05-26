@@ -15,8 +15,12 @@ pub fn build_filter_mask(
     let Some(expr) = where_expr else {
         return Ok(vec![true; row_count]);
     };
+    if let Some(mask) = try_build_mask_dashboard_sparse(table, expr, row_count)? {
+        return Ok(mask);
+    }
     if let Some(mut mask) = try_build_mask(table, expr, row_count)? {
         try_zone_prune(table, expr, &mut mask);
+        try_adv_zone_prune(table, expr, &mut mask);
         return Ok(mask);
     }
     let mut mask = Vec::with_capacity(row_count);
@@ -24,7 +28,60 @@ pub fn build_filter_mask(
         mask.push(eval_bool(table, expr, i)?);
     }
     try_zone_prune(table, expr, &mut mask);
+    try_adv_zone_prune(table, expr, &mut mask);
     Ok(mask)
+}
+
+/// AND tree with dashboard PK predicates: start sparse (false) instead of dense all-true.
+fn try_build_mask_dashboard_sparse(
+    table: &Table,
+    expr: &Expr,
+    row_count: usize,
+) -> Result<Option<Vec<bool>>> {
+    let Some(zones) = table.zones() else {
+        return Ok(None);
+    };
+    let parts = flatten_and(expr);
+    let dash = parts
+        .iter()
+        .find_map(|p| extract_counter_date_range(p));
+    let Some((counter, min_date, max_date)) = dash else {
+        return Ok(None);
+    };
+    let mut mask = zones.build_sparse_dashboard_mask(row_count, counter, min_date, max_date);
+    for part in parts {
+        if extract_counter_date_range(part).is_some() {
+            continue;
+        }
+        let Some(sub) = try_build_mask(table, part, row_count)? else {
+            return Ok(None);
+        };
+        and_masks_inplace(&mut mask, &sub);
+    }
+    try_adv_zone_prune(table, expr, &mut mask);
+    Ok(Some(mask))
+}
+
+fn flatten_and<'a>(expr: &'a Expr) -> Vec<&'a Expr> {
+    match expr {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
+            let mut v = flatten_and(left);
+            v.extend(flatten_and(right));
+            v
+        }
+        Expr::Nested(inner) => flatten_and(inner),
+        other => vec![other],
+    }
+}
+
+fn and_masks_inplace(a: &mut [bool], b: &[bool]) {
+    for (x, y) in a.iter_mut().zip(b) {
+        *x &= *y;
+    }
 }
 
 /// If WHERE is CounterID = N plus EventDate range, clear mask bits for non-matching PK zones.
@@ -36,6 +93,36 @@ fn try_zone_prune(table: &Table, expr: &Expr, mask: &mut [bool]) {
         return;
     };
     zones.apply_dashboard_prune(mask, counter, min_date, max_date);
+}
+
+fn try_adv_zone_prune(table: &Table, expr: &Expr, mask: &mut [bool]) {
+    if !is_adv_ne_zero(expr) {
+        return;
+    }
+    let Some(zones) = table.zones() else {
+        return;
+    };
+    zones.apply_adv_ne_zero_prune(mask);
+}
+
+fn is_adv_ne_zero(expr: &Expr) -> bool {
+    match expr {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::NotEq,
+            right,
+        } => {
+            expr_column_name(left).as_deref() == Some("AdvEngineID")
+                && matches!(&**right, Expr::Value(Value::Number(n, _)) if n == "0")
+        }
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => is_adv_ne_zero(left) || is_adv_ne_zero(right),
+        Expr::Nested(inner) => is_adv_ne_zero(inner),
+        _ => false,
+    }
 }
 
 fn extract_counter_date_range(expr: &Expr) -> Option<(i32, i32, i32)> {
@@ -251,6 +338,9 @@ fn or_masks(a: &[bool], b: &[bool]) -> Vec<bool> {
 }
 
 fn cmp_int_col(col: &ColumnData, lit: i64, op: &BinaryOperator, row_count: usize) -> Vec<bool> {
+    if matches!(op, BinaryOperator::NotEq) && lit == 0 {
+        return cmp_int_ne_zero(col, row_count);
+    }
     let mut mask = Vec::with_capacity(row_count);
     match col {
         ColumnData::Int64(v) => {
@@ -268,6 +358,30 @@ fn cmp_int_col(col: &ColumnData, lit: i64, op: &BinaryOperator, row_count: usize
             let lit = lit as i16;
             for &x in v.iter().take(row_count) {
                 mask.push(cmp_i64(i64::from(x), i64::from(lit), op));
+            }
+        }
+        _ => mask.resize(row_count, false),
+    }
+    mask.resize(row_count, false);
+    mask
+}
+
+fn cmp_int_ne_zero(col: &ColumnData, row_count: usize) -> Vec<bool> {
+    let mut mask = Vec::with_capacity(row_count);
+    match col {
+        ColumnData::Int64(v) => {
+            for &x in v.iter().take(row_count) {
+                mask.push(x != 0);
+            }
+        }
+        ColumnData::Int32(v) => {
+            for &x in v.iter().take(row_count) {
+                mask.push(x != 0);
+            }
+        }
+        ColumnData::Int16(v) => {
+            for &x in v.iter().take(row_count) {
+                mask.push(x != 0);
             }
         }
         _ => mask.resize(row_count, false),

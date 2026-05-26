@@ -317,18 +317,15 @@ fn try_fused_utf8_count(
         return Ok(empty_result(parsed));
     };
 
-    let mut counts: AHashMap<u64, u64> = AHashMap::with_capacity(mask.len() / 4 + 1);
-    let mut keys: AHashMap<u64, String> = AHashMap::new();
+    let mut arena = super::utf8_arena::Utf8CountArena::with_capacity(mask.len() / 4 + 1);
     for_each_selected(&mask, row_count, |i| {
-        let s = &data[i];
-        let h = hash_str(s);
-        *counts.entry(h).or_insert(0) += 1;
-        keys.entry(h).or_insert_with(|| s.to_string());
+        arena.add(&data[i]);
     });
 
-    let out = counts.into_iter().filter_map(|(h, c)| {
-        keys.get(&h).map(|k| (c, vec![k.clone(), c.to_string()]))
-    });
+    let out = arena
+        .into_rows()
+        .into_iter()
+        .map(|(c, k)| (c, vec![k, c.to_string()]));
     finish_count_sorted(parsed, out)
 }
 
@@ -912,7 +909,7 @@ fn empty_result(parsed: &ParsedQuery) -> Option<QueryResult> {
     })
 }
 
-fn finish_count_sorted(
+pub(crate) fn finish_count_sorted(
     parsed: &ParsedQuery,
     scored: impl Iterator<Item = (u64, Vec<String>)>,
 ) -> Result<Option<QueryResult>> {

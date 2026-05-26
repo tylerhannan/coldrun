@@ -32,6 +32,11 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | **Top-K partial sort** | `select_nth_unstable_by` before full sort when `LIMIT` + many groups |
 | **Int COUNT DISTINCT** | `HashSet<i64>` instead of string keys on numeric columns |
 | **PK zone index** | Min/max zones on `CounterID` + `EventDate`; prune dashboard filters (Q36–43) |
+| **Zone pre-agg (v1)** | Per-zone `adv_nonzero` + sparse dashboard masks; Q2 O(zones), Q37–43 ~10× faster |
+| **Direct-index GROUP BY** | Low-cardinality int keys without hash (`group_direct.rs`: Q8, Q9, Q10) |
+| **Sorted / monotonic GROUP BY** | `group_sorted.rs`: RLE after sort; Q16 monotonic UserID |
+| **Utf8 arena** | Bump-buffer interning for fused utf8 COUNT (Q13, Q34, Q37) |
+| **SIMD nonzero counts** | Chunked `<> 0` column scans (`simd_count.rs`, Q2) |
 | **Multi global agg** | One mask pass for `SUM` + `COUNT(*)` + `AVG` (Q3) |
 | **Global COUNT DISTINCT** | Dedicated fast path for int/utf8 columns (Q5–Q6) |
 | **Column-order scan** | `SELECT col ORDER BY col LIMIT` sorts via row indices (Q25–Q26) |
@@ -62,14 +67,15 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | batch 3 (18–21) | Referer GROUP BY, 4-key int GROUP BY, HAVING shortcut, harness README, bench-compare |
 | Q1–Q43 pass | Utf8 GROUP BY, top-K alias fix, Q19 minute extract, Q20 eq scan — see [`perf/`](perf/) |
 | fused kernels | `group_fused.rs`: int-pair aggs (Q31–33), utf8 COUNT, int+utf8, Q19 triple, int4 COUNT, Q24 scan |
+| pass 3 | Zone v1 pre-agg, sparse dashboard masks, `group_direct`, `group_sorted`, utf8 arena, SIMD nonzero — [`bench-all-100k-pass3.md`](overnight/bench-all-100k-pass3.md) |
 
 ## Next (planned)
 
-1. **Streaming top-K during GROUP BY** — hash rows without building full group tables when `LIMIT` is small
-2. **Q19 / Q36** — lower constant factors on high-cardinality group keys
-3. **String / CASE GROUP BY** — Q35, Q40 without per-row interpreter (`group_fused` extensions)
-4. **mmap zero-copy numeric** — keep `Arc<[T]>` column buffers after decode
-5. **Cloud baseline** — full `hits.parquet` on `c6a.4xlarge` + ClickBench cold-run protocol
+1. **Q19 / Q36 / Q35** — high-cardinality keys on demo (~unique per row); streaming top-K on real `hits`
+2. **String / CASE GROUP BY** — Q40 `CASE` keys without per-row interpreter
+3. **mmap zero-copy numeric** — keep `Arc<[T]>` column buffers after decode
+4. **Cloud baseline** — full `hits.parquet` on `c6a.4xlarge` + ClickBench cold-run protocol
+5. **ClickBench PR** — Combined score vs ClickHouse (not demo regression)
 
 ## Honest scope
 

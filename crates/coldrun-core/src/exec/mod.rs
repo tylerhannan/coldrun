@@ -6,12 +6,16 @@ mod filter;
 mod mask_util;
 mod filter_fast;
 mod group;
+mod group_direct;
 mod group_int;
 mod group_fused;
 mod group_referrer;
+mod group_sorted;
 mod group_utf8;
 mod having;
+mod simd_count;
 mod topk;
+mod utf8_arena;
 mod scan;
 mod scan_fast;
 

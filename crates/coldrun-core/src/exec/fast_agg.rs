@@ -6,6 +6,7 @@ use crate::sql::{expr_column_name, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, Table};
 use crate::Result;
 
+use super::simd_count::{count_i16_ne_zero, count_i32_ne_zero, count_i64_ne_zero};
 use super::QueryResult;
 use super::{build_filter_mask, projection_label};
 
@@ -268,14 +269,19 @@ fn try_count_int_nonzero(
     if n != "0" {
         return Ok(None);
     }
+    if name == "AdvEngineID" {
+        if let Some(n) = table.zones().and_then(|z| z.count_adv_nonzero_total()) {
+            return Ok(Some(n));
+        }
+    }
     let col = table.column(&name)?;
     let count = match col {
-        ColumnData::Int16(v) => v.iter().take(row_count).filter(|&&x| x != 0).count(),
-        ColumnData::Int32(v) => v.iter().take(row_count).filter(|&&x| x != 0).count(),
-        ColumnData::Int64(v) => v.iter().take(row_count).filter(|&&x| x != 0).count(),
+        ColumnData::Int16(v) => count_i16_ne_zero(&v[..row_count.min(v.len())]),
+        ColumnData::Int32(v) => count_i32_ne_zero(&v[..row_count.min(v.len())]),
+        ColumnData::Int64(v) => count_i64_ne_zero(&v[..row_count.min(v.len())]),
         _ => return Ok(None),
     };
-    Ok(Some(count as u64))
+    Ok(Some(count))
 }
 
 fn count_selected(mask: &[bool]) -> u64 {

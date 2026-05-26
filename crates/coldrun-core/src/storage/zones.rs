@@ -9,16 +9,35 @@ use super::table::Table;
 use crate::Result;
 
 pub const ZONE_ROWS: usize = 8192;
+pub const ZONE_VERSION_V1: u32 = 1;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Zone {
     pub min_counter: i32,
     pub max_counter: i32,
     pub min_date: i32,
     pub max_date: i32,
+    /// Pre-aggregated nonzero `AdvEngineID` rows in this zone (v1 index only).
+    #[serde(default)]
+    pub adv_nonzero: u32,
+    #[serde(default = "adv_min_unknown")]
+    pub min_adv: i16,
+    #[serde(default = "adv_max_unknown")]
+    pub max_adv: i16,
+}
+
+fn adv_min_unknown() -> i16 {
+    i16::MIN
+}
+
+fn adv_max_unknown() -> i16 {
+    i16::MAX
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ZoneIndex {
+    #[serde(default)]
+    pub version: u32,
     pub zones: Vec<Zone>,
 }
 
@@ -29,6 +48,7 @@ impl ZoneIndex {
         let (ColumnData::Int32(counters), ColumnData::Date(dates)) = (counter, date) else {
             return None;
         };
+        let adv = table.column("AdvEngineID").ok();
         let n = counters.len().min(dates.len());
         if n == 0 {
             return None;
@@ -39,15 +59,39 @@ impl ZoneIndex {
             let end = (z + ZONE_ROWS).min(n);
             let slice_c = &counters[z..end];
             let slice_d = &dates[z..end];
+            let (min_adv, max_adv, adv_nonzero) = if let Some(ColumnData::Int16(adv_col)) = adv {
+                let slice_a = &adv_col[z..end];
+                let mut nz = 0u32;
+                for &x in slice_a {
+                    if x != 0 {
+                        nz += 1;
+                    }
+                }
+                (
+                    *slice_a.iter().min().unwrap_or(&0),
+                    *slice_a.iter().max().unwrap_or(&0),
+                    nz,
+                )
+            } else {
+                (0, 0, 0)
+            };
             zones.push(Zone {
                 min_counter: *slice_c.iter().min().unwrap_or(&0),
                 max_counter: *slice_c.iter().max().unwrap_or(&0),
                 min_date: *slice_d.iter().min().unwrap_or(&0),
                 max_date: *slice_d.iter().max().unwrap_or(&0),
+                adv_nonzero,
+                min_adv,
+                max_adv,
             });
             z = end;
         }
-        Some(Self { zones })
+        let version = if adv.is_some() {
+            ZONE_VERSION_V1
+        } else {
+            0
+        };
+        Some(Self { version, zones })
     }
 
     pub fn write(&self, table_path: &Path) -> Result<()> {
@@ -64,6 +108,69 @@ impl ZoneIndex {
         serde_json::from_slice(&data).ok()
     }
 
+    /// Sum pre-aggregated `AdvEngineID <> 0` row counts (v1 zones).
+    pub fn count_adv_nonzero_total(&self) -> Option<u64> {
+        if self.version < ZONE_VERSION_V1 {
+            return None;
+        }
+        Some(
+            self.zones
+                .iter()
+                .map(|z| u64::from(z.adv_nonzero))
+                .sum(),
+        )
+    }
+
+    /// Build a sparse mask: only PK-matching dashboard zones are true (faster than all-true + prune).
+    pub fn build_sparse_dashboard_mask(
+        &self,
+        row_count: usize,
+        counter: i32,
+        min_date: i32,
+        max_date: i32,
+    ) -> Vec<bool> {
+        let mut mask = vec![false; row_count];
+        let mut row = 0usize;
+        for zone in &self.zones {
+            let zone_end = (row + ZONE_ROWS).min(row_count);
+            if zone_end <= row {
+                break;
+            }
+            if zone.max_counter >= counter
+                && zone.min_counter <= counter
+                && zone.max_date >= min_date
+                && zone.min_date <= max_date
+            {
+                for m in &mut mask[row..zone_end] {
+                    *m = true;
+                }
+            }
+            row = zone_end;
+        }
+        mask
+    }
+
+    /// Clear mask bits in zones that cannot contain `AdvEngineID <> 0`.
+    pub fn apply_adv_ne_zero_prune(&self, mask: &mut [bool]) {
+        if self.version < ZONE_VERSION_V1 {
+            return;
+        }
+        let row_count = mask.len();
+        let mut row = 0usize;
+        for zone in &self.zones {
+            let zone_end = (row + ZONE_ROWS).min(row_count);
+            if zone_len_zero(zone_end, row) {
+                break;
+            }
+            if zone.max_adv <= 0 {
+                for m in &mut mask[row..zone_end] {
+                    *m = false;
+                }
+            }
+            row = zone_end;
+        }
+    }
+
     /// Mark row indices that may match CounterID = `counter` and EventDate in [min_date, max_date].
     pub fn apply_dashboard_prune(
         &self,
@@ -76,8 +183,7 @@ impl ZoneIndex {
         let mut row = 0usize;
         for zone in &self.zones {
             let zone_end = (row + ZONE_ROWS).min(row_count);
-            let zone_len = zone_end.saturating_sub(row);
-            if zone_len == 0 {
+            if zone_len_zero(zone_end, row) {
                 break;
             }
             let might_match = zone.max_counter >= counter
@@ -131,7 +237,17 @@ fn _read_bin(path: &Path) -> Result<ZoneIndex> {
             max_counter,
             min_date,
             max_date,
+            adv_nonzero: 0,
+            min_adv: 0,
+            max_adv: 0,
         });
     }
-    Ok(ZoneIndex { zones })
+    Ok(ZoneIndex {
+        version: ZONE_VERSION_V1,
+        zones,
+    })
+}
+
+fn zone_len_zero(zone_end: usize, row: usize) -> bool {
+    zone_end.saturating_sub(row) == 0
 }
