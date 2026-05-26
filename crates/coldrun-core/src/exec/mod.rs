@@ -1,6 +1,8 @@
 mod aggregate;
 mod fast_agg;
+mod fast_q29;
 mod filter;
+mod mask_util;
 mod filter_fast;
 mod group;
 mod group_int;
@@ -18,6 +20,7 @@ pub use scan::execute_scan;
 
 use aggregate::eval_global_select;
 use fast_agg::try_execute_global;
+use fast_q29::try_execute_q29;
 use filter::build_filter_mask;
 
 #[derive(Debug, Clone)]
@@ -65,6 +68,10 @@ pub fn execute(db: &Database, sql: &str) -> Result<QueryResult> {
 
     let table = db.open_table_for_query("hits", &parsed)?;
     let row_count = table.row_count() as usize;
+
+    if let Some(result) = try_execute_q29(&table, &parsed, row_count)? {
+        return Ok(result);
+    }
 
     if let Some(result) = try_execute_global(&table, &parsed, row_count)? {
         return Ok(result);
