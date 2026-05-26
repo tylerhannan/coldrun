@@ -22,7 +22,7 @@ Coldrun is the database under test. It does not run ClickBench for other systems
 
 ## Prerequisites
 
-- Rust stable (`rustup` recommended)
+- Rust stable (`rustup` recommended); ensure `cargo` is on your `PATH` (reload the shell after install, or `source "$HOME/.cargo/env"`)
 - For full dataset: ~15 GB download for `hits.parquet`
 
 ## Build
@@ -34,17 +34,17 @@ cargo build --release -p coldrun-cli
 
 ## Quick smoke (no download)
 
-Synthetic ~10k rows, runs ClickBench queries 1–10:
+Synthetic ~10k rows, runs ClickBench queries 1–10. Full details: [`docs/SMOKE-DEMO.md`](docs/SMOKE-DEMO.md).
 
 ```bash
 ./scripts/smoke-demo.sh
 ```
 
-Or manually:
+Or manually (after `cargo build --release -p coldrun-cli`):
 
 ```bash
-coldrun local --demo 10000 --sql "SELECT COUNT(*) FROM hits"
-coldrun local --data-dir .coldrun-demo --sql "SELECT COUNT(*) FROM hits"  # after first load
+./target/release/coldrun local --demo 10000 --sql "SELECT COUNT(*) FROM hits"
+./target/release/coldrun --data-dir .coldrun-demo local --sql "SELECT COUNT(*) FROM hits"  # after first load
 ```
 
 ## Full dataset
@@ -78,6 +78,7 @@ crates/coldrun-core/   # storage, SQL parse, executor
 crates/coldrun-cli/    # coldrun binary
 clickbench/coldrun/    # ClickBench integration (install, load, query, …)
 docs/ARCHITECTURE.md
+docs/SMOKE-DEMO.md     # quick local smoke test (scripts/smoke-demo.sh)
 ```
 
 ## Goals (toy scope)

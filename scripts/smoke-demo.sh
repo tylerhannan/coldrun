@@ -1,5 +1,6 @@
 #!/bin/bash
 # MVP smoke: queries 1–10 on synthetic data (no Parquet download).
+# See docs/SMOKE-DEMO.md
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
