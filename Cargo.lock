@@ -471,10 +471,12 @@ dependencies = [
 name = "coldrun-core"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "anyhow",
  "arrow",
  "chrono",
  "lz4_flex",
+ "memchr",
  "memmap2",
  "parquet",
  "rayon",

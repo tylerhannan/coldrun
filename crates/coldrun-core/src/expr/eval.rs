@@ -193,7 +193,10 @@ pub fn eval_group_key(table: &Table, expr: &Expr, row: usize) -> Result<String> 
 pub fn eval_like_match(haystack: &str, pattern: &str) -> bool {
     if let Some(rest) = pattern.strip_prefix('%') {
         if let Some(inner) = rest.strip_suffix('%') {
-            return haystack.contains(inner);
+            if inner.is_empty() {
+                return true;
+            }
+            return memchr::memmem::find(haystack.as_bytes(), inner.as_bytes()).is_some();
         }
         return haystack.ends_with(rest);
     }
