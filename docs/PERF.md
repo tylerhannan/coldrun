@@ -11,6 +11,13 @@ Coldrun optimizes for ClickBench **Combined** (hot 60%, cold 20%, load 10%, disk
 
 Compare before/after on the same machine with the same `ROWS` argument.
 
+Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
+
+```bash
+./scripts/overnight-regression.sh 100000   # item 1 baseline
+./scripts/overnight-regression.sh 500000   # item 2 stress
+```
+
 ## Implemented
 
 | Area | What |
@@ -36,6 +43,7 @@ Compare before/after on the same machine with the same `ROWS` argument.
 | round 1–3 | Int GROUP BY, top-K, zones |
 | round 4 | Multi global agg, global COUNT DISTINCT |
 | round 5 | Scan sort fast path, hash reserve, in-place mask AND/OR |
+| overnight 1–2 | Regression script; 100k/500k baselines in `docs/overnight/` |
 
 ## Next (planned)
 
