@@ -19,7 +19,7 @@ Coldrun is the database under test. It does not run ClickBench for other systems
 | 1. Architecture doc | Done | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | 2. MVP: load `hits`, queries 1–5 | Done | demo + Parquet (dynamic schema) |
 | 3. All 43 queries correct | Done (demo) | All 43 pass on synthetic data via `./scripts/smoke-all.sh` |
-| 4. Optimize Combined score | In progress | Zones, int GROUP BY, top-K, LZ4; see [`docs/PERF.md`](docs/PERF.md) |
+| 4. Optimize Combined score | In progress | Fused GROUP BY kernels, top-K heap, zones — see [`docs/PERF.md`](docs/PERF.md) |
 | 5. ClickBench PR | Not started | [`clickbench/coldrun/`](clickbench/coldrun/) harness |
 
 ## Prerequisites
@@ -41,7 +41,8 @@ Synthetic `hits` rows are generated in-process — same schema shape, not real C
 ```bash
 ./scripts/smoke-demo.sh          # queries 1–15, ~10k rows (default)
 ./scripts/smoke-all.sh           # all 43 queries; optional row count, e.g. ./scripts/smoke-all.sh 100000
-./scripts/bench-all.sh 100000    # time every query (see docs/overnight/bench-all-100k.md)
+./scripts/bench-all.sh 100000       # time every query (see docs/overnight/)
+./scripts/bench-compare.sh 100000   # before/after diff on same machine
 ./scripts/overnight-regression.sh 100000  # smoke + bench Q1–10
 ```
 
@@ -95,6 +96,19 @@ docs/SMOKE-DEMO.md     # quick local smoke test (scripts/smoke-demo.sh)
 - Load the ClickBench `hits` dataset (~100M rows)
 - Run standard SQL analytical queries
 - Optionally pursue ClickBench leaderboard numbers — treated as a learning exercise, not a product promise
+
+## Next (planned)
+
+Demo @ 100k is **43/43 correct**; slowest queries are still **~90–130ms** (Q19, Q36, Q35). Planned work:
+
+1. **Streaming top-K during GROUP BY** — never materialize all groups when `ORDER BY count LIMIT 10` (heap helps at finish; still hash every row)
+2. **Q19 / Q36 hot paths** — triple-key and 4-key groups on real `hits` cardinality (demo data is nearly unique per row, which inflates hash cost)
+3. **String GROUP BY without interpreter** — Q35 `GROUP BY 1, URL`, Q40 `CASE` keys, multi-utf8 MIN/aggregate shapes
+4. **mmap zero-copy numerics** — keep `Arc<[T]>` column buffers after decode (avoid copy on read)
+5. **Cloud baseline** — full `hits.parquet` on `c6a.4xlarge` via [`clickbench/coldrun/`](clickbench/coldrun/); publish Combined-oriented numbers
+6. **ClickBench PR** — wire harness polish + cold-run repro (build step 5)
+
+Per-query adversarial notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass2.md`](docs/overnight/bench-all-100k-pass2.md)
 
 ## Out of scope
 

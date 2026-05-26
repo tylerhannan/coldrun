@@ -65,9 +65,11 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 
 ## Next (planned)
 
-1. **mmap zero-copy numeric** — keep `Arc<[T]>` column buffers after decode
-2. **String multi-key GROUP BY** — Q35 `GROUP BY 1, URL` without full interpreter loop
-3. **Cloud baseline** — full `hits.parquet` numbers on `c6a.4xlarge`
+1. **Streaming top-K during GROUP BY** — hash rows without building full group tables when `LIMIT` is small
+2. **Q19 / Q36** — lower constant factors on high-cardinality group keys
+3. **String / CASE GROUP BY** — Q35, Q40 without per-row interpreter (`group_fused` extensions)
+4. **mmap zero-copy numeric** — keep `Arc<[T]>` column buffers after decode
+5. **Cloud baseline** — full `hits.parquet` on `c6a.4xlarge` + ClickBench cold-run protocol
 
 ## Honest scope
 
