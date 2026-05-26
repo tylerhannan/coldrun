@@ -87,12 +87,13 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | pass 6 | `PodStorage`/`Arc<[T]>`, StreamingTopK utf8 COUNT, Q24 partial sort, Q6 intern — [`bench-all-100k-pass6.md`](overnight/bench-all-100k-pass6.md) |
 | pass 7 | Q24 two-phase I/O, near-unique O(limit) GROUP BY, StreamingAggTopK int-pair — [`bench-all-100k-pass7.md`](overnight/bench-all-100k-pass7.md) |
 | pass 8 | Metadata-only COUNT(*), near-unique Q16/Q22/Q23, Q25 partial sort, Q21 LIKE count — [`bench-all-100k-pass8.md`](overnight/bench-all-100k-pass8.md) |
+| pass 9 | Row-indexed Q24 `project_rows`, fused AND filter, zone v2 EventTime — [`bench-all-100k-pass9.md`](overnight/bench-all-100k-pass9.md) |
 
 ## Next (planned)
 
-1. **Row-indexed column decode** — read only top-K row slices from `.col` files (Q24)
-2. **Fused multi-LIKE filters** — Q23 WHERE without three full-column masks
-3. **Zone v2 / block stats** — min-max per column chunk for Parquet-scale pruning
+1. **Utf8 offset sidecar** — O(1) random row read in column files
+2. **Zone-guided EventTime scan** — ORDER BY LIMIT using v2 zone bounds
+3. **Parallel column projection** — rayon `project_rows` for Q24
 
 ## Honest scope
 
