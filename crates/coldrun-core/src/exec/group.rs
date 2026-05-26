@@ -23,6 +23,12 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
     let table = db.open_table_for_query("hits", parsed)?;
     let row_count = table.row_count() as usize;
 
+    if let Some(result) = super::group_near_unique::try_execute_near_unique(
+        &table, parsed, row_count,
+    )? {
+        return Ok(result);
+    }
+
     if let Some(result) = super::group_direct::try_execute_group_direct(
         &table, parsed, row_count,
     )? {

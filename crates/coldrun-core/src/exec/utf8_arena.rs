@@ -62,3 +62,42 @@ fn hash_str(s: &str) -> u64 {
     s.hash(&mut h);
     h.finish()
 }
+
+/// Intern only (no counts) — for multi-string group keys (Q40).
+pub struct Utf8Intern {
+    pub(crate) buf: Vec<u8>,
+    pub(crate) spans: Vec<(u32, u32)>,
+    hash_to_id: AHashMap<u64, u32>,
+}
+
+impl Utf8Intern {
+    pub fn with_capacity(n: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(n * 16),
+            spans: Vec::with_capacity(n),
+            hash_to_id: AHashMap::with_capacity(n),
+        }
+    }
+
+    pub fn intern(&mut self, s: &str) -> u32 {
+        let h = hash_str(s);
+        if let Some(&id) = self.hash_to_id.get(&h) {
+            let (off, len) = self.spans[id as usize];
+            if self.buf.get(off as usize..off as usize + len as usize) == Some(s.as_bytes()) {
+                return id;
+            }
+        }
+        let off = self.buf.len() as u32;
+        let bytes = s.as_bytes();
+        self.buf.extend_from_slice(bytes);
+        let id = self.spans.len() as u32;
+        self.spans.push((off, bytes.len() as u32));
+        self.hash_to_id.insert(h, id);
+        id
+    }
+
+    pub fn get(&self, id: u32) -> &str {
+        let (off, len) = self.spans[id as usize];
+        std::str::from_utf8(&self.buf[off as usize..off as usize + len as usize]).unwrap_or("")
+    }
+}

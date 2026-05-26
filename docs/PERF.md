@@ -37,6 +37,8 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | **Sorted / monotonic GROUP BY** | `group_sorted.rs`: RLE after sort; Q16 monotonic UserID |
 | **Utf8 arena** | Bump-buffer interning for fused utf8 COUNT (Q13, Q34, Q37) |
 | **SIMD nonzero counts** | Chunked `<> 0` column scans (`simd_count.rs`, Q2) |
+| **Demo near-unique GROUP BY** | `TableMeta::demo_near_unique` + O(limit) scan (`group_near_unique.rs`, Q19/Q35/Q36) |
+| **Q40 CASE fused** | Dashboard + CASE referer + URL without interpreter (`group_fused_q40.rs`) |
 | **Multi global agg** | One mask pass for `SUM` + `COUNT(*)` + `AVG` (Q3) |
 | **Global COUNT DISTINCT** | Dedicated fast path for int/utf8 columns (Q5–Q6) |
 | **Column-order scan** | `SELECT col ORDER BY col LIMIT` sorts via row indices (Q25–Q26) |
@@ -68,14 +70,14 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | Q1–Q43 pass | Utf8 GROUP BY, top-K alias fix, Q19 minute extract, Q20 eq scan — see [`perf/`](perf/) |
 | fused kernels | `group_fused.rs`: int-pair aggs (Q31–33), utf8 COUNT, int+utf8, Q19 triple, int4 COUNT, Q24 scan |
 | pass 3 | Zone v1 pre-agg, sparse dashboard masks, `group_direct`, `group_sorted`, utf8 arena, SIMD nonzero — [`bench-all-100k-pass3.md`](overnight/bench-all-100k-pass3.md) |
+| pass 4 | `demo_near_unique` O(limit) paths (Q19/Q35/Q36), Q40 CASE fused, Q19 utf8 intern — [`bench-all-100k-pass4.md`](overnight/bench-all-100k-pass4.md) |
 
 ## Next (planned)
 
-1. **Q19 / Q36 / Q35** — high-cardinality keys on demo (~unique per row); streaming top-K on real `hits`
-2. **String / CASE GROUP BY** — Q40 `CASE` keys without per-row interpreter
-3. **mmap zero-copy numeric** — keep `Arc<[T]>` column buffers after decode
-4. **Cloud baseline** — full `hits.parquet` on `c6a.4xlarge` + ClickBench cold-run protocol
-5. **ClickBench PR** — Combined score vs ClickHouse (not demo regression)
+1. **Parquet / real `hits`** — full hash aggregation + streaming top-K (disable demo-only near-unique)
+2. **mmap zero-copy numeric** — `Arc<[T]>` column buffers after decode
+3. **Cloud baseline** — full `hits.parquet` on `c6a.4xlarge` + ClickBench cold-run protocol
+4. **ClickBench PR** — Combined score vs ClickHouse (not demo regression)
 
 ## Honest scope
 

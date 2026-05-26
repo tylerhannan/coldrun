@@ -21,6 +21,9 @@ pub fn try_execute_group_fused(
     parsed: &ParsedQuery,
     row_count: usize,
 ) -> Result<Option<QueryResult>> {
+    if let Some(r) = super::group_fused_q40::try_fused_q40(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
     if let Some(r) = try_fused_int4_count(table, parsed, row_count)? {
         return Ok(Some(r));
     }
@@ -60,7 +63,7 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
-fn build_mask(
+pub(crate) fn build_mask(
     table: &Table,
     parsed: &ParsedQuery,
     row_count: usize,
@@ -456,40 +459,24 @@ fn try_fused_q19(
         return Ok(empty_result(parsed));
     };
 
-    #[derive(Clone)]
-    struct Q19Bucket {
-        user: i64,
-        minute: i64,
-        phrase: String,
-        count: u64,
-    }
-
-    let mut groups: AHashMap<(i64, i64, u64), Q19Bucket> =
+    let mut phrase_ids = super::utf8_arena::Utf8Intern::with_capacity(mask.len() / 4 + 1);
+    let mut groups: AHashMap<(i64, i64, u32), u64> =
         AHashMap::with_capacity(mask.len() / 4 + 1);
     for_each_selected(&mask, row_count, |i| {
         let u = users[i];
         let minute = ((times[i] / 1_000_000) / 60) % 60;
-        let s = &phrases[i];
-        let key = (u, minute, hash_str(s));
-        let b = groups.entry(key).or_insert_with(|| Q19Bucket {
-            user: u,
-            minute,
-            phrase: s.to_string(),
-            count: 0,
-        });
-        if b.phrase.as_str() == s {
-            b.count += 1;
-        }
+        let pid = phrase_ids.intern(&phrases[i]);
+        *groups.entry((u, minute, pid)).or_insert(0) += 1;
     });
 
-    let out = groups.into_values().map(|b| {
+    let out = groups.into_iter().map(|((u, minute, pid), count)| {
         (
-            b.count,
+            count,
             vec![
-                b.user.to_string(),
-                b.minute.to_string(),
-                b.phrase,
-                b.count.to_string(),
+                u.to_string(),
+                minute.to_string(),
+                phrase_ids.get(pid).to_string(),
+                count.to_string(),
             ],
         )
     });
@@ -678,7 +665,7 @@ fn pack4(table: &Table, exprs: &[Expr], row: usize) -> Result<u128> {
     Ok(key)
 }
 
-fn eval_int_key(table: &Table, expr: &Expr, row: usize) -> Result<i64> {
+pub(crate) fn eval_int_key(table: &Table, expr: &Expr, row: usize) -> Result<i64> {
     match expr {
         Expr::Identifier(id) => i64_at(table.column(&id.value)?, row),
         Expr::BinaryOp {

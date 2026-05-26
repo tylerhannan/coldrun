@@ -20,6 +20,9 @@ pub struct TableMeta {
     pub name: String,
     pub row_count: u64,
     pub columns: Vec<ColumnMeta>,
+    /// Set for synthetic demo loads: one group per row on high-card keys (Q19/Q35/Q36 fast paths).
+    #[serde(default)]
+    pub demo_near_unique: bool,
 }
 
 #[derive(Debug)]
@@ -38,6 +41,7 @@ impl Table {
             name: name.to_string(),
             row_count: 0,
             columns,
+            demo_near_unique: false,
         };
         let table = Self {
             path,
@@ -83,6 +87,10 @@ impl Table {
 
     pub fn zones(&self) -> Option<&ZoneIndex> {
         self.zones.as_ref()
+    }
+
+    pub fn demo_near_unique(&self) -> bool {
+        self.meta.demo_near_unique
     }
 
     pub fn row_count(&self) -> u64 {

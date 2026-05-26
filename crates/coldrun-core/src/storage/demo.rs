@@ -123,6 +123,7 @@ pub fn load_demo_hits(db: &mut Database, rows: u64) -> Result<u64> {
     }
 
     table.set_row_count(rows);
+    table.meta.demo_near_unique = true;
     table.flush()?;
     db.register_table(table_name)?;
     Ok(rows)

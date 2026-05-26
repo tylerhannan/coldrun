@@ -7,6 +7,8 @@ mod mask_util;
 mod filter_fast;
 mod group;
 mod group_direct;
+mod group_fused_q40;
+mod group_near_unique;
 mod group_int;
 mod group_fused;
 mod group_referrer;
