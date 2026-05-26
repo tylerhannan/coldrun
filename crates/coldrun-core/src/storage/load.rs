@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use rayon::prelude::*;
 use arrow::array::{
     Array, Date32Array, Int16Array, Int32Array, Int64Array, LargeStringArray, StringArray,
     TimestampMicrosecondArray,
@@ -119,11 +120,20 @@ pub fn load_parquet_columns(
         let n = batch.num_rows();
         total_rows += n as u64;
 
-        for (col_name, col_ty) in col_schema {
-            let array = batch.column_by_name(col_name).ok_or_else(|| {
-                crate::Error::msg(format!("parquet batch missing column {col_name}"))
-            })?;
-            append_array(table.column_mut(col_name)?, array.as_ref(), *col_ty)?;
+        let chunks: Vec<(String, ColumnData)> = col_schema
+            .par_iter()
+            .map(|(col_name, col_ty)| {
+                let array = batch.column_by_name(col_name).ok_or_else(|| {
+                    crate::Error::msg(format!("parquet batch missing column {col_name}"))
+                })?;
+                let mut chunk = super::column::empty_column(*col_ty);
+                append_array(&mut chunk, array.as_ref(), *col_ty)?;
+                Ok((col_name.clone(), chunk))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        for (col_name, chunk) in chunks {
+            table.column_mut(&col_name)?.extend_from(&chunk)?;
         }
     }
 
