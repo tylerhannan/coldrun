@@ -99,15 +99,14 @@ docs/SMOKE-DEMO.md     # quick local smoke test (scripts/smoke-demo.sh)
 
 ## Next (planned)
 
-Demo @ 100k is **43/43 correct**; **total ~0.72s** for 43 queries (pass 3). Slowest: **Q19 ~175ms**, **Q36 ~118ms**, **Q35 ~87ms** (demo data is nearly unique per row on those keys). Planned work:
+Demo @ 100k is **43/43 correct**; **total ~0.42s** for 43 queries (pass 4). Slowest now are mostly **~20–26ms** pair-key GROUP BYs (Q31–33, Q23). Planned work:
 
-1. **Q19 / Q36 / Q35** — streaming top-K or column-order grouping on high-cardinality keys (real `hits` has duplicates; demo does not)
-2. **String / CASE GROUP BY** — Q40 `CASE` keys without per-row interpreter
-3. **mmap zero-copy numerics** — keep `Arc<[T]>` column buffers after decode
-4. **Cloud baseline** — full `hits.parquet` on `c6a.4xlarge` via [`clickbench/coldrun/`](clickbench/coldrun/)
-5. **ClickBench PR** — Combined score vs ClickHouse (demo timings are regression-only)
+1. **Real `hits` cardinality** — `demo_near_unique` fast paths are demo-only; Parquet load needs full hash + streaming top-K
+2. **mmap zero-copy numerics** — `Arc<[T]>` column buffers after decode
+3. **Cloud baseline** — full `hits.parquet` on `c6a.4xlarge` via [`clickbench/coldrun/`](clickbench/coldrun/)
+4. **ClickBench PR** — Combined score vs ClickHouse (demo timings are regression-only)
 
-Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass3.md`](docs/overnight/bench-all-100k-pass3.md)
+Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass4.md`](docs/overnight/bench-all-100k-pass4.md)
 
 ## Out of scope
 
