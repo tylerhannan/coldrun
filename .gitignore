@@ -4,6 +4,8 @@
 .coldrun-bench/
 clickbench/coldrun/.clickbench/
 smoke-all.log
+logs/overnight/
+overnight-*.log
 hits.parquet
 *.parquet
 result.csv
