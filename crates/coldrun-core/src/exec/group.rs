@@ -9,6 +9,7 @@ use crate::Result;
 
 use super::aggregate::AggState;
 use super::filter::build_filter_mask;
+use super::group_int::{apply_limit_offset, try_execute_grouped_int};
 use super::QueryResult;
 
 struct GroupBucket {
@@ -19,6 +20,11 @@ struct GroupBucket {
 pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResult> {
     let table = db.open_table_for_query("hits", parsed)?;
     let row_count = table.row_count() as usize;
+
+    if let Some(result) = try_execute_grouped_int(&table, parsed, row_count)? {
+        return Ok(result);
+    }
+
     let mask = build_filter_mask(&table, parsed.where_expr.as_ref(), row_count)?;
 
     let mut groups: HashMap<Vec<String>, GroupBucket> = HashMap::new();
@@ -33,7 +39,7 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
             key.push(eval_group_key(&table, &resolved, i)?);
         }
 
-        let bucket = groups.entry(key.clone()).or_insert_with(|| GroupBucket {
+        let bucket = groups.entry(key).or_insert_with(|| GroupBucket {
             states: parsed
                 .select_items
                 .iter()
@@ -91,17 +97,7 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
     }
 
     sort_rows(&parsed, &column_names, &mut rows)?;
-    if let Some(offset) = parsed.offset {
-        let off = offset as usize;
-        if off < rows.len() {
-            rows.drain(0..off);
-        } else {
-            rows.clear();
-        }
-    }
-    if let Some(limit) = parsed.limit {
-        rows.truncate(limit as usize);
-    }
+    apply_limit_offset(parsed, &mut rows);
 
     Ok(QueryResult {
         columns: column_names,
@@ -109,11 +105,11 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
     })
 }
 
-fn is_aggregate(kind: &SelectItemKind) -> bool {
+pub(crate) fn is_aggregate(kind: &SelectItemKind) -> bool {
     !matches!(kind, SelectItemKind::Column(_) | SelectItemKind::Other(_))
 }
 
-fn is_group_key_proj(proj: &SelectProjection, group_by: &[Expr]) -> bool {
+pub(crate) fn is_group_key_proj(proj: &SelectProjection, group_by: &[Expr]) -> bool {
     if let SelectItemKind::Column(e) = &proj.kind {
         return group_by.iter().any(|g| g == e);
     }
@@ -129,7 +125,7 @@ fn is_group_key_proj(proj: &SelectProjection, group_by: &[Expr]) -> bool {
     false
 }
 
-fn resolve_group_expr(expr: &Expr, projections: &[SelectProjection]) -> Expr {
+pub(crate) fn resolve_group_expr(expr: &Expr, projections: &[SelectProjection]) -> Expr {
     if let Expr::Identifier(id) = expr {
         for p in projections {
             if p.alias.as_deref() == Some(&id.value) {
@@ -143,7 +139,11 @@ fn resolve_group_expr(expr: &Expr, projections: &[SelectProjection]) -> Expr {
     expr.clone()
 }
 
-fn eval_proj_at_row(table: &crate::storage::Table, proj: &SelectProjection, row: usize) -> Result<String> {
+pub(crate) fn eval_proj_at_row(
+    table: &crate::storage::Table,
+    proj: &SelectProjection,
+    row: usize,
+) -> Result<String> {
     match &proj.kind {
         SelectItemKind::Column(e) | SelectItemKind::Other(e) => {
             if let Ok(s) = eval_string(table, e, row) {
@@ -155,7 +155,7 @@ fn eval_proj_at_row(table: &crate::storage::Table, proj: &SelectProjection, row:
     }
 }
 
-fn sort_rows(
+pub(crate) fn sort_rows(
     parsed: &crate::sql::ParsedQuery,
     columns: &[String],
     rows: &mut [Vec<String>],

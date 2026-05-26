@@ -84,6 +84,14 @@ impl Table {
         self.meta.columns.iter().map(|c| c.name.as_str())
     }
 
+    pub fn column_type(&self, name: &str) -> Option<ColumnType> {
+        self.meta
+            .columns
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.ty)
+    }
+
     pub fn column(&self, name: &str) -> Result<&ColumnData> {
         self.columns
             .get(name)

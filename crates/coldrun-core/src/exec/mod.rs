@@ -3,6 +3,7 @@ mod fast_agg;
 mod filter;
 mod filter_fast;
 mod group;
+mod group_int;
 mod scan;
 
 use crate::sql::{parse_query, projection_label};
