@@ -17,3 +17,15 @@ Completed on demo data (`ROWS=100000` unless noted).
 - **bench-compare**: first run saves `.coldrun-bench-all/baseline-{ROWS}.tsv`; second run diffs.
 
 Correctness: `./scripts/smoke-all.sh` → 43/43 PASS.
+
+## bench-all @ 100k (post batch 3)
+
+See [`bench-all-100k.md`](bench-all-100k.md). Highlights:
+
+| Q | batch 2 | batch 3 |
+|---|---------|---------|
+| 29 | 0.182s | 0.004s |
+| 28 | — | 0.004s |
+| 36 | 0.243s | 0.122s |
+
+Slowest remaining: Q32 (0.144s), Q33 (0.142s), Q19 (0.139s).
