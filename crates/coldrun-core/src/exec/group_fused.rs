@@ -24,6 +24,15 @@ pub fn try_execute_group_fused(
     if let Some(r) = super::group_fused_q40::try_fused_q40(table, parsed, row_count)? {
         return Ok(Some(r));
     }
+    if let Some(r) = super::group_fused_q22::try_fused_q22(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = super::group_fused_q23::try_fused_q23(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = super::group_fused_q11::try_fused_utf8_one_distinct(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
     if let Some(r) = try_fused_int4_count(table, parsed, row_count)? {
         return Ok(Some(r));
     }
@@ -203,36 +212,46 @@ fn try_fused_int_pair_aggs(
     let c2 = table.column(&k2)?;
     let sum_c = table.column(&sum_col)?;
     let avg_c = table.column(&avg_col)?;
+    let ic1 = super::column_slice::as_int_cols(c1).ok_or_else(|| crate::Error::msg("k1"))?;
+    let ic2 = super::column_slice::as_int_cols(c2).ok_or_else(|| crate::Error::msg("k2"))?;
+    let sum_slice = super::column_slice::as_int_cols(sum_c);
+    let avg_slice = super::column_slice::as_int_cols(avg_c);
 
     let Some(mask) = build_mask(table, parsed, row_count)? else {
         return Ok(empty_result(parsed));
     };
 
-    let mut groups: AHashMap<u128, PairAgg> = AHashMap::with_capacity(mask.len() / 4 + 1);
+    const SHARDS: usize = 256;
+    let mut shards: [AHashMap<u128, PairAgg>; SHARDS] =
+        std::array::from_fn(|_| AHashMap::with_capacity(mask.len() / (SHARDS * 4) + 1));
+
     for_each_selected(&mask, row_count, |i| {
-        let key = pack_pair_keys(c1, c2, i);
-        let b = groups.entry(key).or_default();
+        let key = super::column_slice::pack_pair(ic1, ic2, i);
+        let shard = (key as usize) % SHARDS;
+        let b = shards[shard].entry(key).or_default();
         b.count += 1;
-        if let (Ok(sb), Ok(sw)) = (i64_at(sum_c, i), i64_at(avg_c, i)) {
-            b.sum_b += sb;
-            b.sum_w += sw;
+        if let (Some(ss), Some(as_)) = (sum_slice, avg_slice) {
+            b.sum_b += super::column_slice::int_at(ss, i);
+            b.sum_w += super::column_slice::int_at(as_, i);
             b.n_w += 1;
         }
     });
 
-    let rows = groups.into_iter().map(|(key, b)| {
-        let (a, bb) = unpack_pair_keys(c1, c2, key);
-        let avg = b.sum_w as f64 / b.n_w.max(1) as f64;
-        (
-            b.count,
-            vec![
-                a,
-                bb,
-                b.count.to_string(),
-                b.sum_b.to_string(),
-                format!("{avg}"),
-            ],
-        )
+    let rows = shards.into_iter().flat_map(|groups| {
+        groups.into_iter().map(|(key, b)| {
+            let (a, bb) = unpack_pair_keys(c1, c2, key);
+            let avg = b.sum_w as f64 / b.n_w.max(1) as f64;
+            (
+                b.count,
+                vec![
+                    a,
+                    bb,
+                    b.count.to_string(),
+                    b.sum_b.to_string(),
+                    format!("{avg}"),
+                ],
+            )
+        })
     });
     finish_count_sorted(parsed, rows)
 }
@@ -262,12 +281,6 @@ fn detect_sum_avg_cols(parsed: &ParsedQuery) -> Option<(String, String)> {
         }
     }
     Some((sum_c?, avg_c?))
-}
-
-fn pack_pair_keys(c1: &ColumnData, c2: &ColumnData, row: usize) -> u128 {
-    let a = i64_at(c1, row).unwrap_or(0) as u64;
-    let b = i64_at(c2, row).unwrap_or(0) as u64;
-    ((a as u128) << 64) | (b as u128)
 }
 
 fn unpack_pair_keys(c1: &ColumnData, c2: &ColumnData, key: u128) -> (String, String) {
@@ -766,26 +779,26 @@ fn try_fused_int16_utf8_distinct(
         return Ok(empty_result(parsed));
     };
 
-    let mut groups: AHashMap<u128, (i16, String, AHashMap<i64, ()>)> =
+    let mut model_intern = super::utf8_arena::Utf8Intern::with_capacity(256);
+    let mut groups: AHashMap<(i16, u32), AHashMap<i64, ()>> =
         AHashMap::with_capacity(mask.len() / 8 + 1);
 
     for_each_selected(&mask, row_count, |i| {
         let phone = i16col[i];
-        let model = &utf8col[i];
-        let key = ((phone as u128) << 64) | (hash_str(model) as u128);
-        let e = groups.entry(key).or_insert_with(|| {
-            let mut set = AHashMap::new();
-            set.insert(users[i], ());
-            (phone, model.to_string(), set)
-        });
-        if e.1.as_str() == model {
-            e.2.insert(users[i], ());
-        }
+        let mid = model_intern.intern(&utf8col[i]);
+        groups.entry((phone, mid)).or_default().insert(users[i], ());
     });
 
-    let out = groups.into_values().map(|(a, b, set)| {
+    let out = groups.into_iter().map(|((phone, mid), set)| {
         let u = set.len() as u64;
-        (u, vec![a.to_string(), b, u.to_string()])
+        (
+            u,
+            vec![
+                phone.to_string(),
+                model_intern.get(mid).to_string(),
+                u.to_string(),
+            ],
+        )
     });
     finish_count_sorted(parsed, out)
 }

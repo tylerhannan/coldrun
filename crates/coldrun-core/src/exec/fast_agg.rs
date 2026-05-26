@@ -6,6 +6,7 @@ use crate::sql::{expr_column_name, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, Table};
 use crate::Result;
 
+use super::mask_util::for_each_selected;
 use super::simd_count::{count_i16_ne_zero, count_i32_ne_zero, count_i64_ne_zero};
 use super::QueryResult;
 use super::{build_filter_mask, projection_label};
@@ -87,7 +88,7 @@ pub fn try_execute_global(
             }
         }
         SelectItemKind::CountDistinct(expr) => {
-            if let Some(n) = count_distinct_masked(table, expr, &mask) {
+            if let Some(n) = count_distinct_masked(table, expr, &mask, row_count) {
                 return Ok(Some(QueryResult {
                     columns: vec![col_name],
                     rows: vec![vec![n.to_string()]],
@@ -179,7 +180,7 @@ fn try_execute_global_multi(
                 let avg = sum as f64 / n.max(1) as f64;
                 format!("{avg}")
             }
-            SimpleAgg::CountDistinct(name) => count_distinct_col_masked(table, name, &mask)
+            SimpleAgg::CountDistinct(name) => count_distinct_col_masked(table, name, &mask, row_count)
                 .ok_or_else(|| crate::Error::msg("count distinct"))?
                 .to_string(),
         });
@@ -223,7 +224,7 @@ fn try_execute_global_multi_distinct(
     for (proj, name) in parsed.select_items.iter().zip(names.iter()) {
         columns.push(projection_label(proj));
         values.push(
-            count_distinct_col_masked(table, name, &mask)
+            count_distinct_col_masked(table, name, &mask, row_count)
                 .ok_or_else(|| crate::Error::msg("count distinct"))?
                 .to_string(),
         );
@@ -288,49 +289,52 @@ fn count_selected(mask: &[bool]) -> u64 {
     mask.iter().map(|&b| u64::from(b)).sum()
 }
 
-fn count_distinct_masked(table: &Table, expr: &Expr, mask: &[bool]) -> Option<u64> {
+fn count_distinct_masked(
+    table: &Table,
+    expr: &Expr,
+    mask: &[bool],
+    row_count: usize,
+) -> Option<u64> {
     let name = expr_column_name(expr)?;
-    count_distinct_col_masked(table, &name, mask)
+    count_distinct_col_masked(table, &name, mask, row_count)
 }
 
-fn count_distinct_col_masked(table: &Table, name: &str, mask: &[bool]) -> Option<u64> {
+fn count_distinct_col_masked(
+    table: &Table,
+    name: &str,
+    mask: &[bool],
+    row_count: usize,
+) -> Option<u64> {
     let col = table.column(name).ok()?;
     match col {
         ColumnData::Int64(v) => {
             let mut set = AHashSet::new();
-            for (i, &x) in v.iter().enumerate() {
-                if mask.get(i).copied().unwrap_or(false) {
-                    set.insert(x);
-                }
-            }
+            for_each_selected(mask, row_count, |i| {
+                set.insert(v[i]);
+            });
             Some(set.len() as u64)
         }
         ColumnData::Int32(v) => {
             let mut set = AHashSet::new();
-            for (i, &x) in v.iter().enumerate() {
-                if mask.get(i).copied().unwrap_or(false) {
-                    set.insert(i64::from(x));
-                }
-            }
+            for_each_selected(mask, row_count, |i| {
+                set.insert(i64::from(v[i]));
+            });
             Some(set.len() as u64)
         }
         ColumnData::Int16(v) => {
             let mut set = AHashSet::new();
-            for (i, &x) in v.iter().enumerate() {
-                if mask.get(i).copied().unwrap_or(false) {
-                    set.insert(i64::from(x));
-                }
-            }
+            for_each_selected(mask, row_count, |i| {
+                set.insert(i64::from(v[i]));
+            });
             Some(set.len() as u64)
         }
         ColumnData::Utf8(v) => {
-            let mut set = AHashSet::<String>::new();
-            for (i, s) in v.iter().enumerate() {
-                if mask.get(i).copied().unwrap_or(false) {
-                    set.insert(s.clone());
-                }
-            }
-            Some(set.len() as u64)
+            let mut intern = super::utf8_arena::Utf8Intern::with_capacity(4096);
+            let mut ids = AHashSet::new();
+            for_each_selected(mask, row_count, |i| {
+                ids.insert(intern.intern(&v[i]));
+            });
+            Some(ids.len() as u64)
         }
         _ => None,
     }

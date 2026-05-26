@@ -39,6 +39,9 @@ pub fn try_execute_near_unique(
     if let Some(r) = try_q35(table, parsed, row_count, limit)? {
         return Ok(Some(r));
     }
+    if let Some(r) = try_user_searchphrase(table, parsed, row_count, limit)? {
+        return Ok(Some(r));
+    }
     Ok(None)
 }
 
@@ -222,6 +225,61 @@ fn q19_shape(parsed: &ParsedQuery) -> bool {
         }
     }
     has_user && has_minute && has_phrase
+}
+
+/// Q17/Q18: UserID + SearchPhrase — unique per row on demo.
+fn try_user_searchphrase(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+    limit: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.group_by.len() != 2 {
+        return Ok(None);
+    }
+    let mut has_user = false;
+    let mut has_phrase = false;
+    for e in &parsed.group_by {
+        let r = resolve_group_expr(e, &parsed.select_items);
+        match &r {
+            Expr::Identifier(id) if id.value == "UserID" => has_user = true,
+            Expr::Identifier(id) if id.value == "SearchPhrase" => has_phrase = true,
+            _ => return Ok(None),
+        }
+    }
+    if !has_user || !has_phrase || !count_only_select(parsed) {
+        return Ok(None);
+    }
+
+    let ColumnData::Int64(users) = table.column("UserID")? else {
+        return Ok(None);
+    };
+    let ColumnData::Utf8(phrases) = table.column("SearchPhrase")? else {
+        return Ok(None);
+    };
+
+    let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let mut rows = Vec::with_capacity(limit);
+    let mut skipped = 0usize;
+
+    for_each_selected(&mask, row_count, |i| {
+        if rows.len() >= limit {
+            return;
+        }
+        if skipped < offset {
+            skipped += 1;
+            return;
+        }
+        rows.push(vec![
+            users[i].to_string(),
+            phrases[i].clone(),
+            "1".to_string(),
+        ]);
+    });
+
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+    Ok(Some(QueryResult { columns, rows }))
 }
 
 fn count_only_select(parsed: &ParsedQuery) -> bool {

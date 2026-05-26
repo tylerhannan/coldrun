@@ -32,6 +32,29 @@ pub enum ColumnData {
 }
 
 impl ColumnData {
+    pub fn as_i64_slice(&self) -> Option<&[i64]> {
+        match self {
+            ColumnData::Int64(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_i32_slice(&self) -> Option<&[i32]> {
+        match self {
+            ColumnData::Int32(v) | ColumnData::Date(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_i16_slice(&self) -> Option<&[i16]> {
+        match self {
+            ColumnData::Int16(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+impl ColumnData {
     pub fn len(&self) -> usize {
         match self {
             Self::Int64(v) => v.len(),

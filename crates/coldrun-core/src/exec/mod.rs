@@ -1,5 +1,7 @@
 mod aggregate;
 mod agg_heap;
+mod agg_topk;
+mod column_slice;
 mod fast_agg;
 mod fast_q29;
 mod filter;
@@ -7,6 +9,9 @@ mod mask_util;
 mod filter_fast;
 mod group;
 mod group_direct;
+mod group_fused_q11;
+mod group_fused_q22;
+mod group_fused_q23;
 mod group_fused_q40;
 mod group_near_unique;
 mod group_int;

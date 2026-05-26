@@ -39,6 +39,9 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | **SIMD nonzero counts** | Chunked `<> 0` column scans (`simd_count.rs`, Q2) |
 | **Demo near-unique GROUP BY** | `TableMeta::demo_near_unique` + O(limit) scan (`group_near_unique.rs`, Q19/Q35/Q36) |
 | **Q40 CASE fused** | Dashboard + CASE referer + URL without interpreter (`group_fused_q40.rs`) |
+| **Sharded int-pair GROUP BY** | 256-way shards for Q31–33 (`column_slice.rs`) |
+| **Fused SearchPhrase aggs** | Q11/Q22/Q23 (`group_fused_q11.rs`, `group_fused_q22.rs`, `group_fused_q23.rs`) |
+| **Streaming top-K scaffold** | `agg_topk.rs` (for real `hits` cardinality) |
 | **Multi global agg** | One mask pass for `SUM` + `COUNT(*)` + `AVG` (Q3) |
 | **Global COUNT DISTINCT** | Dedicated fast path for int/utf8 columns (Q5–Q6) |
 | **Column-order scan** | `SELECT col ORDER BY col LIMIT` sorts via row indices (Q25–Q26) |
@@ -71,13 +74,14 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | fused kernels | `group_fused.rs`: int-pair aggs (Q31–33), utf8 COUNT, int+utf8, Q19 triple, int4 COUNT, Q24 scan |
 | pass 3 | Zone v1 pre-agg, sparse dashboard masks, `group_direct`, `group_sorted`, utf8 arena, SIMD nonzero — [`bench-all-100k-pass3.md`](overnight/bench-all-100k-pass3.md) |
 | pass 4 | `demo_near_unique` O(limit) paths (Q19/Q35/Q36), Q40 CASE fused, Q19 utf8 intern — [`bench-all-100k-pass4.md`](overnight/bench-all-100k-pass4.md) |
+| pass 5 | Sharded Q31–33, fused Q11/Q22/Q23, near-unique Q17–18, DISTINCT intern — [`bench-all-100k-pass5.md`](overnight/bench-all-100k-pass5.md) |
 
 ## Next (planned)
 
-1. **Parquet / real `hits`** — full hash aggregation + streaming top-K (disable demo-only near-unique)
-2. **mmap zero-copy numeric** — `Arc<[T]>` column buffers after decode
-3. **Cloud baseline** — full `hits.parquet` on `c6a.4xlarge` + ClickBench cold-run protocol
-4. **ClickBench PR** — Combined score vs ClickHouse (not demo regression)
+1. **StreamingTopK on real paths** — wire `agg_topk.rs` when loading Parquet / non-demo tables
+2. **`Arc<[T]>` column buffers** — zero-copy numeric decode after LZ4
+3. **Q24 scan** — projection pushdown + column-order read
+4. **ClickBench PR prep** — harness polish (scores need cloud VM)
 
 ## Honest scope
 
