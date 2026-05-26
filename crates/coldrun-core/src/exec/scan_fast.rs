@@ -115,10 +115,16 @@ fn try_scan_star_like_order_limit(
     let mask = build_filter_mask(table, Some(where_expr), row_count)?;
     let time_col = table.column("EventTime")?;
     let mut indices = indices_from_mask(&mask);
-    sort_indices_by_column(time_col, &mut indices, false);
 
     let offset = parsed.offset.unwrap_or(0) as usize;
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(indices.len());
+    let need = offset.saturating_add(limit);
+    if need > 0 && need < indices.len() {
+        partial_sort_indices_by_timestamp(time_col, &mut indices, need);
+        indices.truncate(need);
+    } else {
+        sort_indices_by_column(time_col, &mut indices, false);
+    }
     let slice: Vec<usize> = indices.into_iter().skip(offset).take(limit).collect();
 
     let names: Vec<String> = table.column_names().map(|s| s.to_string()).collect();
@@ -264,6 +270,19 @@ fn build_scan_result(
         columns: vec![label],
         rows,
     })
+}
+
+fn partial_sort_indices_by_timestamp(col: &ColumnData, indices: &mut [usize], need: usize) {
+    let ColumnData::Timestamp(v) = col else {
+        sort_indices_by_column(col, indices, false);
+        return;
+    };
+    if indices.len() <= need {
+        sort_indices_by_column(col, indices, false);
+        return;
+    }
+    indices.select_nth_unstable_by(need - 1, |&a, &b| v[a].cmp(&v[b]));
+    indices[..need].sort_by(|&a, &b| v[a].cmp(&v[b]));
 }
 
 fn sort_indices_by_column(col: &ColumnData, indices: &mut [usize], desc: bool) {

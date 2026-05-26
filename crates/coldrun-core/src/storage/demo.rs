@@ -55,7 +55,7 @@ pub fn load_demo_hits(db: &mut Database, rows: u64) -> Result<u64> {
                     } else {
                         i as i64
                     };
-                    c.push(v);
+                    let _ = c.push(v);
                 }
             }
             (ColumnData::Int32(c), ColumnType::Int32) => {
@@ -66,7 +66,7 @@ pub fn load_demo_hits(db: &mut Database, rows: u64) -> Result<u64> {
                         "ClientIP" => (i as i32).wrapping_mul(7),
                         _ => (i % 500) as i32,
                     };
-                    c.push(v);
+                    let _ = c.push(v);
                 }
             }
             (ColumnData::Int16(c), ColumnType::Int16) => {
@@ -87,18 +87,18 @@ pub fn load_demo_hits(db: &mut Database, rows: u64) -> Result<u64> {
                         "WindowClientHeight" => (i % 150) as i16,
                         _ => (i % 7) as i16,
                     };
-                    c.push(v);
+                    let _ = c.push(v);
                 }
             }
             (ColumnData::Date(c), ColumnType::Date) => {
                 for i in 0..n {
                     let day = JULY1_DAYS + (i % 31) as i32;
-                    c.push(day);
+                    let _ = c.push(day);
                 }
             }
             (ColumnData::Timestamp(c), ColumnType::Timestamp) => {
                 for i in 0..n {
-                    c.push(base_ts + (i as i64) * 60_000_000);
+                    let _ = c.push(base_ts + (i as i64) * 60_000_000);
                 }
             }
             (ColumnData::Utf8(c), ColumnType::Utf8) => {
@@ -115,7 +115,7 @@ pub fn load_demo_hits(db: &mut Database, rows: u64) -> Result<u64> {
                         "Referer" if i % 13 == 0 => format!("https://news.ycombinator.com/item?id={i}"),
                         _ => format!("value-{i}"),
                     };
-                    c.push(v);
+                    let _ = c.push(v);
                 }
             }
             _ => {}

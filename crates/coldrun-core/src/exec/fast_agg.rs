@@ -31,6 +31,11 @@ pub fn try_execute_global(
         return try_execute_global_multi(table, parsed, row_count);
     }
 
+    // Q6: global COUNT(DISTINCT SearchPhrase) — no WHERE.
+    if let Some(r) = try_count_distinct_searchphrase(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
+
     let proj = &parsed.select_items[0];
     let col_name = projection_label(proj);
 
@@ -243,6 +248,38 @@ fn classify_simple(kind: &SelectItemKind) -> Result<Option<SimpleAgg>> {
         SelectItemKind::CountDistinct(e) => expr_column_name(e).map(SimpleAgg::CountDistinct),
         _ => None,
     })
+}
+
+fn try_count_distinct_searchphrase(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.where_expr.is_some() || parsed.group_by.len() > 0 {
+        return Ok(None);
+    }
+    if parsed.select_items.len() != 1 {
+        return Ok(None);
+    }
+    let proj = &parsed.select_items[0];
+    let SelectItemKind::CountDistinct(e) = &proj.kind else {
+        return Ok(None);
+    };
+    if crate::sql::expr_column_name(e).as_deref() != Some("SearchPhrase") {
+        return Ok(None);
+    }
+    let ColumnData::Utf8(v) = table.column("SearchPhrase")? else {
+        return Ok(None);
+    };
+    let mut intern = super::utf8_arena::Utf8Intern::with_capacity(4096);
+    let mut ids = ahash::AHashSet::new();
+    for s in v.iter().take(row_count) {
+        ids.insert(intern.intern(s));
+    }
+    Ok(Some(QueryResult {
+        columns: vec![projection_label(proj)],
+        rows: vec![vec![ids.len().to_string()]],
+    }))
 }
 
 fn try_count_int_nonzero(

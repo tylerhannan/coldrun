@@ -41,7 +41,9 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | **Q40 CASE fused** | Dashboard + CASE referer + URL without interpreter (`group_fused_q40.rs`) |
 | **Sharded int-pair GROUP BY** | 256-way shards for Q31–33 (`column_slice.rs`) |
 | **Fused SearchPhrase aggs** | Q11/Q22/Q23 (`group_fused_q11.rs`, `group_fused_q22.rs`, `group_fused_q23.rs`) |
-| **Streaming top-K scaffold** | `agg_topk.rs` (for real `hits` cardinality) |
+| **Streaming top-K scaffold** | `agg_topk.rs` wired for utf8 COUNT with LIMIT (non-demo) |
+| **`PodStorage` / Arc numerics** | Shared POD buffers after column read (`storage/pod.rs`) |
+| **Q24 partial sort** | `select_nth_unstable` for ORDER BY EventTime LIMIT scan |
 | **Multi global agg** | One mask pass for `SUM` + `COUNT(*)` + `AVG` (Q3) |
 | **Global COUNT DISTINCT** | Dedicated fast path for int/utf8 columns (Q5–Q6) |
 | **Column-order scan** | `SELECT col ORDER BY col LIMIT` sorts via row indices (Q25–Q26) |
@@ -75,13 +77,13 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | pass 3 | Zone v1 pre-agg, sparse dashboard masks, `group_direct`, `group_sorted`, utf8 arena, SIMD nonzero — [`bench-all-100k-pass3.md`](overnight/bench-all-100k-pass3.md) |
 | pass 4 | `demo_near_unique` O(limit) paths (Q19/Q35/Q36), Q40 CASE fused, Q19 utf8 intern — [`bench-all-100k-pass4.md`](overnight/bench-all-100k-pass4.md) |
 | pass 5 | Sharded Q31–33, fused Q11/Q22/Q23, near-unique Q17–18, DISTINCT intern — [`bench-all-100k-pass5.md`](overnight/bench-all-100k-pass5.md) |
+| pass 6 | `PodStorage`/`Arc<[T]>`, StreamingTopK utf8 COUNT, Q24 partial sort, Q6 intern — [`bench-all-100k-pass6.md`](overnight/bench-all-100k-pass6.md) |
 
 ## Next (planned)
 
-1. **StreamingTopK on real paths** — wire `agg_topk.rs` when loading Parquet / non-demo tables
-2. **`Arc<[T]>` column buffers** — zero-copy numeric decode after LZ4
-3. **Q24 scan** — projection pushdown + column-order read
-4. **ClickBench PR prep** — harness polish (scores need cloud VM)
+1. **Two-phase Q24 I/O** — narrow column load for filter/sort, lazy project for LIMIT rows
+2. **StreamingTopK on Parquet GROUP BY** — int-pair and multi-utf8 paths when not demo
+3. **ClickBench PR prep** — harness polish (scores need cloud VM)
 
 ## Honest scope
 

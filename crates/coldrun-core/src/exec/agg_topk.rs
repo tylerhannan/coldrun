@@ -10,14 +10,12 @@ use super::agg_heap::top_counts;
 
 /// Incremental group counts with optional prune before materializing all keys.
 /// Scaffold for Parquet / real `hits` where group cardinality ≫ LIMIT.
-#[allow(dead_code)]
 pub struct StreamingTopK<K: Hash + Eq + Clone> {
     counts: AHashMap<K, u64>,
     limit: usize,
     offset: usize,
 }
 
-#[allow(dead_code)]
 impl<K: Hash + Eq + Clone + Ord> StreamingTopK<K> {
     pub fn new(limit: usize, offset: usize) -> Self {
         Self {

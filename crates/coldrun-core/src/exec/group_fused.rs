@@ -334,6 +334,20 @@ fn try_fused_utf8_count(
     };
 
     let mut arena = super::utf8_arena::Utf8CountArena::with_capacity(mask.len() / 4 + 1);
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+
+    if limit < usize::MAX && !table.demo_near_unique() {
+        let mut intern = super::utf8_arena::Utf8Intern::with_capacity(512);
+        let mut topk = super::agg_topk::StreamingTopK::new(limit, offset);
+        for_each_selected(&mask, row_count, |i| {
+            topk.inc(intern.intern(&data[i]));
+        });
+        let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+        let rows = topk.finish(|id, c| vec![intern.get(id).to_string(), c.to_string()]);
+        return Ok(Some(QueryResult { columns, rows }));
+    }
+
     for_each_selected(&mask, row_count, |i| {
         arena.add(&data[i]);
     });

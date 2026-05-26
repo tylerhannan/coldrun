@@ -8,6 +8,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, TimeUnit};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use super::column::{ColumnData, ColumnType};
+use super::pod::PodStorage;
 use super::table::{ColumnMeta, Table};
 use super::Database;
 use crate::Result;
@@ -146,20 +147,20 @@ pub fn load_parquet_columns(
 fn append_array(col: &mut ColumnData, array: &dyn Array, ty: ColumnType) -> Result<()> {
     match (col, ty) {
         (ColumnData::Int64(c), ColumnType::Int64) => {
-            downcast_append(array, c, |a: &Int64Array, i| a.value(i))?;
+            downcast_append_pod(array, c, |a: &Int64Array, i| a.value(i))?;
         }
         (ColumnData::Int32(c), ColumnType::Int32) => {
-            downcast_append(array, c, |a: &Int32Array, i| a.value(i))?;
+            downcast_append_pod(array, c, |a: &Int32Array, i| a.value(i))?;
         }
         (ColumnData::Int16(c), ColumnType::Int16) => {
-            downcast_append(array, c, |a: &Int16Array, i| a.value(i))?;
+            downcast_append_pod(array, c, |a: &Int16Array, i| a.value(i))?;
         }
         (ColumnData::Date(c), ColumnType::Date) => {
-            downcast_append(array, c, |a: &Date32Array, i| a.value(i))?;
+            downcast_append_pod(array, c, |a: &Date32Array, i| a.value(i))?;
         }
         (ColumnData::Timestamp(c), ColumnType::Timestamp) => match array.data_type() {
             DataType::Timestamp(TimeUnit::Microsecond, _) => {
-                downcast_append(array, c, |a: &TimestampMicrosecondArray, i| a.value(i))?;
+                downcast_append_pod(array, c, |a: &TimestampMicrosecondArray, i| a.value(i))?;
             }
             other => {
                 return Err(crate::Error::msg(format!(
@@ -203,7 +204,11 @@ fn append_array(col: &mut ColumnData, array: &dyn Array, ty: ColumnType) -> Resu
     Ok(())
 }
 
-fn downcast_append<A: Array + 'static, T, F>(array: &dyn Array, out: &mut Vec<T>, f: F) -> Result<()>
+fn downcast_append_pod<A: Array + 'static, T: Copy, F>(
+    array: &dyn Array,
+    out: &mut PodStorage<T>,
+    f: F,
+) -> Result<()>
 where
     F: Fn(&A, usize) -> T,
 {
@@ -215,7 +220,7 @@ where
         if a.is_null(i) {
             return Err(crate::Error::msg("null value in hits dataset column"));
         }
-        out.push(f(a, i));
+        out.push(f(a, i))?;
     }
     Ok(())
 }
