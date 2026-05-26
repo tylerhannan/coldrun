@@ -23,6 +23,12 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
     let table = db.open_table_for_query("hits", parsed)?;
     let row_count = table.row_count() as usize;
 
+    if let Some(result) = super::group_referrer::try_execute_grouped_referrer(
+        &table, parsed, row_count,
+    )? {
+        return Ok(result);
+    }
+
     if let Some(result) = try_execute_grouped_int(&table, parsed, row_count)? {
         return Ok(result);
     }
@@ -30,6 +36,19 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
     let mask = build_filter_mask(&table, parsed.where_expr.as_ref(), row_count)?;
 
     let selected = mask.iter().filter(|&&b| b).count();
+    if let Some(having) = &parsed.having {
+        if !super::having::having_can_match(having, selected.max(1) as u64) {
+            let column_names: Vec<String> = parsed
+                .select_items
+                .iter()
+                .map(crate::sql::projection_label)
+                .collect();
+            return Ok(QueryResult {
+                columns: column_names,
+                rows: vec![],
+            });
+        }
+    }
     let mut groups: AHashMap<Vec<String>, GroupBucket> =
         AHashMap::with_capacity((selected / 8).max(16));
 

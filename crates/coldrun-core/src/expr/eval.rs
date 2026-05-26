@@ -190,6 +190,14 @@ pub fn eval_group_key(table: &Table, expr: &Expr, row: usize) -> Result<String> 
     }
 }
 
+/// Extract host from ClickBench referer URL pattern (Q29).
+pub fn referer_host(url: &str) -> String {
+    if let Some(caps) = RE_REFERER_HOST.captures(url) {
+        return caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+    }
+    url.to_string()
+}
+
 pub fn eval_like_match(haystack: &str, pattern: &str) -> bool {
     if let Some(rest) = pattern.strip_prefix('%') {
         if let Some(inner) = rest.strip_suffix('%') {
@@ -328,10 +336,7 @@ fn eval_regexp_replace(table: &Table, f: &Function, row: usize) -> Result<String
         e => return Err(crate::Error::msg(format!("expected pattern literal, got {e}"))),
     })?;
     if pattern.contains("https?://") {
-        if let Some(caps) = RE_REFERER_HOST.captures(&input) {
-            return Ok(caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default());
-        }
-        return Ok(input);
+        return Ok(referer_host(&input));
     }
     let replacement = value_to_string(&match extract_expr(f, 2)? {
         Expr::Value(v) => v,

@@ -6,6 +6,8 @@ mod mask_util;
 mod filter_fast;
 mod group;
 mod group_int;
+mod group_referrer;
+mod having;
 mod topk;
 mod scan;
 mod scan_fast;

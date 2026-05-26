@@ -2,7 +2,7 @@
 
 use ahash::AHashMap;
 
-use sqlparser::ast::Expr;
+use sqlparser::ast::{BinaryOperator, Expr, Value};
 
 use crate::sql::{projection_label, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, ColumnType, Table};
@@ -14,13 +14,14 @@ use super::mask_util::{mask_is_sparse, selected_indices};
 use super::group::{
     eval_proj_at_row, is_aggregate, is_group_key_proj, resolve_group_expr, sort_rows,
 };
+use super::having::having_can_match;
 use super::topk::truncate_to_top_k;
 use super::QueryResult;
 
-const MAX_PACKED_KEYS: usize = 2;
+const MAX_PACKED_KEYS: usize = 4;
 
 struct IntGroupSpec {
-    col_names: Vec<String>,
+    exprs: Vec<Expr>,
 }
 
 pub fn try_execute_grouped_int(
@@ -34,15 +35,19 @@ pub fn try_execute_grouped_int(
     };
 
     let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
-    let selected = mask.iter().filter(|&&b| b).count();
-    let mut groups: AHashMap<u128, GroupBucket> =
-        AHashMap::with_capacity((selected / 8).max(16));
+    let selected = mask.iter().filter(|&&b| b).count() as u64;
+    if let Some(having) = &parsed.having {
+        if !having_can_match(having, selected.max(1)) {
+            let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+            return Ok(Some(QueryResult {
+                columns,
+                rows: vec![],
+            }));
+        }
+    }
 
-    let col_refs: Vec<&ColumnData> = spec
-        .col_names
-        .iter()
-        .map(|n| table.column(n))
-        .collect::<Result<_>>()?;
+    let mut groups: AHashMap<u128, GroupBucket> =
+        AHashMap::with_capacity((selected as usize / 8).max(16));
 
     let row_iter: Vec<usize> = if mask_is_sparse(&mask) {
         selected_indices(&mask)
@@ -51,7 +56,7 @@ pub fn try_execute_grouped_int(
     };
 
     for i in row_iter {
-        let key = pack_key(&col_refs, i);
+        let key = pack_key(table, &spec.exprs, i)?;
         let bucket = groups.entry(key).or_insert_with(|| GroupBucket {
             states: parsed
                 .select_items
@@ -82,36 +87,85 @@ fn plan_int_group(table: &Table, parsed: &ParsedQuery) -> Result<Option<IntGroup
     if parsed.group_by.is_empty() || parsed.group_by.len() > MAX_PACKED_KEYS {
         return Ok(None);
     }
-    let mut col_names = Vec::with_capacity(parsed.group_by.len());
+    let mut exprs = Vec::with_capacity(parsed.group_by.len());
     for expr in &parsed.group_by {
         let resolved = resolve_group_expr(expr, &parsed.select_items);
-        let name = match &resolved {
-            Expr::Identifier(id) => id.value.clone(),
-            _ => return Ok(None),
-        };
-        let ty = table
-            .column_type(&name)
-            .ok_or_else(|| crate::Error::msg(format!("column {name}")))?;
-        if !matches!(
-            ty,
-            ColumnType::Int16 | ColumnType::Int32 | ColumnType::Int64 | ColumnType::Date
-        ) {
+        if !is_int_group_expr(table, &resolved)? {
             return Ok(None);
         }
-        col_names.push(name);
+        exprs.push(resolved);
     }
-    Ok(Some(IntGroupSpec { col_names }))
+    Ok(Some(IntGroupSpec { exprs }))
 }
 
-fn pack_key(cols: &[&ColumnData], row: usize) -> u128 {
-    match cols.len() {
-        1 => i64_key_at(cols[0], row) as u128,
-        2 => {
-            let a = i64_key_at(cols[0], row) as u64;
-            let b = i64_key_at(cols[1], row) as u64;
-            ((a as u128) << 64) | (b as u128)
+fn is_int_group_expr(table: &Table, expr: &Expr) -> Result<bool> {
+    match expr {
+        Expr::Identifier(id) => {
+            let ty = table
+                .column_type(&id.value)
+                .ok_or_else(|| crate::Error::msg(format!("column {}", id.value)))?;
+            Ok(matches!(
+                ty,
+                ColumnType::Int16 | ColumnType::Int32 | ColumnType::Int64 | ColumnType::Date
+            ))
         }
-        _ => 0,
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Minus,
+            right,
+        } => {
+            Ok(is_int_group_expr(table, left)?
+                && matches!(&**right, Expr::Value(Value::Number(_, _))))
+        }
+        Expr::Value(Value::Number(_, _)) => Ok(true),
+        _ => Ok(false),
+    }
+}
+
+fn eval_int_group_key(table: &Table, expr: &Expr, row: usize) -> Result<i64> {
+    match expr {
+        Expr::Identifier(id) => {
+            let col = table.column(&id.value)?;
+            Ok(i64_key_at(&col, row))
+        }
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Minus,
+            right,
+        } => {
+            let l = eval_int_group_key(table, left, row)?;
+            let r = match &**right {
+                Expr::Value(Value::Number(n, _)) => n
+                    .parse::<i64>()
+                    .map_err(|e| crate::Error::msg(format!("bad number: {e}")))?,
+                _ => eval_int_group_key(table, right, row)?,
+            };
+            Ok(l - r)
+        }
+        Expr::Value(Value::Number(n, _)) => n
+            .parse::<i64>()
+            .map_err(|e| crate::Error::msg(format!("bad number: {e}"))),
+        _ => Err(crate::Error::msg("int group key")),
+    }
+}
+
+fn pack_key(table: &Table, exprs: &[Expr], row: usize) -> Result<u128> {
+    match exprs.len() {
+        1 => Ok(eval_int_group_key(table, &exprs[0], row)? as u128),
+        2 => {
+            let a = eval_int_group_key(table, &exprs[0], row)? as u64;
+            let b = eval_int_group_key(table, &exprs[1], row)? as u64;
+            Ok(((a as u128) << 64) | (b as u128))
+        }
+        n if n <= 4 => {
+            let mut key = 0u128;
+            for (i, expr) in exprs.iter().enumerate().take(4) {
+                let v = eval_int_group_key(table, expr, row)? as u32;
+                key |= (v as u128) << (32 * i);
+            }
+            Ok(key)
+        }
+        _ => Err(crate::Error::msg("too many group keys")),
     }
 }
 
@@ -133,6 +187,10 @@ fn unpack_key(key: u128, ncols: usize) -> Vec<String> {
             let b = key as i64;
             vec![a.to_string(), b.to_string()]
         }
+        n @ 3..=4 => (0..n)
+            .map(|i| ((key >> (32 * i)) & 0xFFFF_FFFF) as i32)
+            .map(|v| v.to_string())
+            .collect(),
         _ => vec![],
     }
 }
