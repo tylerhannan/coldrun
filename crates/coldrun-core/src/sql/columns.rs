@@ -53,7 +53,8 @@ pub fn referenced_columns(parsed: &ParsedQuery) -> Option<HashSet<String>> {
         collect_expr(e, &mut cols);
     }
     if cols.is_empty() {
-        return None;
+        // Metadata-only query (e.g. bare COUNT(*)) — load zero column files.
+        return Some(cols);
     }
     Some(cols)
 }

@@ -119,29 +119,55 @@ impl Table {
         self.columns.contains_key(name)
     }
 
-    /// Load column files not yet in memory (two-phase scan projection).
+    /// Load column files not yet in memory (two-phase scan projection). Parallel when multiple.
     pub fn load_columns(&mut self, names: &[&str]) -> Result<()> {
-        for &name in names {
-            if self.columns.contains_key(name) {
-                continue;
-            }
-            let col_meta = self
-                .meta
-                .columns
-                .iter()
-                .find(|c| c.name == name)
-                .ok_or_else(|| crate::Error::msg(format!("unknown column '{name}'")))?;
-            let col_path = self
-                .path
-                .join("columns")
-                .join(format!("{}.col", col_meta.name));
-            if !col_path.exists() {
-                return Err(crate::Error::msg(format!("column file missing: {name}")));
-            }
-            self.columns
-                .insert(col_meta.name.clone(), ColumnData::read_file(&col_path)?);
+        let to_load: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|&name| !self.columns.contains_key(name))
+            .collect();
+        if to_load.is_empty() {
+            return Ok(());
+        }
+
+        let col_dir = self.path.join("columns");
+        let meta_cols = self.meta.columns.clone();
+
+        let loaded: Vec<(String, ColumnData)> = if to_load.len() == 1 {
+            let name = to_load[0];
+            vec![(name.to_string(), Self::read_column_file(&col_dir, &meta_cols, name)?)]
+        } else {
+            use rayon::prelude::*;
+            to_load
+                .par_iter()
+                .map(|&name| {
+                    Ok((
+                        name.to_string(),
+                        Self::read_column_file(&col_dir, &meta_cols, name)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        for (name, data) in loaded {
+            self.columns.insert(name, data);
         }
         Ok(())
+    }
+
+    fn read_column_file(
+        col_dir: &std::path::Path,
+        meta_cols: &[ColumnMeta],
+        name: &str,
+    ) -> Result<ColumnData> {
+        if !meta_cols.iter().any(|c| c.name == name) {
+            return Err(crate::Error::msg(format!("unknown column '{name}'")));
+        }
+        let col_path = col_dir.join(format!("{name}.col"));
+        if !col_path.exists() {
+            return Err(crate::Error::msg(format!("column file missing: {name}")));
+        }
+        ColumnData::read_file(&col_path)
     }
 
     pub fn unload_columns(&self) -> Vec<String> {
@@ -151,6 +177,30 @@ impl Table {
             .filter(|c| !self.columns.contains_key(&c.name))
             .map(|c| c.name.clone())
             .collect()
+    }
+
+    /// Project row values at `row_indices` without loading full columns into memory.
+    pub fn project_rows(&self, row_indices: &[usize]) -> Result<(Vec<String>, Vec<Vec<String>>)> {
+        let names: Vec<String> = self.meta.columns.iter().map(|c| c.name.clone()).collect();
+        let ncols = names.len();
+        let nrows = row_indices.len();
+        let mut rows: Vec<Vec<String>> = (0..nrows).map(|_| Vec::with_capacity(ncols)).collect();
+        let col_dir = self.path.join("columns");
+
+        for col_meta in &self.meta.columns {
+            if let Ok(loaded) = self.column(&col_meta.name) {
+                for (out, &r) in rows.iter_mut().zip(row_indices) {
+                    out.push(ColumnData::cell_to_string(loaded, r));
+                }
+            } else {
+                let path = col_dir.join(format!("{}.col", col_meta.name));
+                let cells = ColumnData::read_cells_at(&path, row_indices)?;
+                for (out, cell) in rows.iter_mut().zip(cells) {
+                    out.push(cell);
+                }
+            }
+        }
+        Ok((names, rows))
     }
 
     pub fn column_mut(&mut self, name: &str) -> Result<&mut ColumnData> {

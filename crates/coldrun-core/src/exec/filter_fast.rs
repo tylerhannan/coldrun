@@ -18,6 +18,11 @@ pub fn build_filter_mask(
     if let Some(mask) = try_build_mask_dashboard_sparse(table, expr, row_count)? {
         return Ok(mask);
     }
+    if let Some(mut mask) = try_build_mask_and_fused(table, expr, row_count)? {
+        try_zone_prune(table, expr, &mut mask);
+        try_adv_zone_prune(table, expr, &mut mask);
+        return Ok(mask);
+    }
     if let Some(mut mask) = try_build_mask(table, expr, row_count)? {
         try_zone_prune(table, expr, &mut mask);
         try_adv_zone_prune(table, expr, &mut mask);
@@ -76,6 +81,121 @@ fn flatten_and<'a>(expr: &'a Expr) -> Vec<&'a Expr> {
         Expr::Nested(inner) => flatten_and(inner),
         other => vec![other],
     }
+}
+
+enum FusedPred<'a> {
+    Utf8NeEmpty(&'a [String]),
+    Utf8Like {
+        data: &'a [String],
+        pattern: String,
+        negated: bool,
+    },
+    IntNeZeroInt16(&'a [i16]),
+    IntNeZeroInt32(&'a [i32]),
+    IntNeZeroInt64(&'a [i64]),
+}
+
+impl FusedPred<'_> {
+    fn eval(&self, row: usize) -> bool {
+        match self {
+            FusedPred::Utf8NeEmpty(v) => !v[row].is_empty(),
+            FusedPred::Utf8Like {
+                data,
+                pattern,
+                negated,
+            } => {
+                let m = eval_like_match(&data[row], pattern);
+                if *negated {
+                    !m
+                } else {
+                    m
+                }
+            }
+            FusedPred::IntNeZeroInt16(v) => v[row] != 0,
+            FusedPred::IntNeZeroInt32(v) => v[row] != 0,
+            FusedPred::IntNeZeroInt64(v) => v[row] != 0,
+        }
+    }
+}
+
+fn try_build_mask_and_fused(
+    table: &Table,
+    expr: &Expr,
+    row_count: usize,
+) -> Result<Option<Vec<bool>>> {
+    let parts = flatten_and(expr);
+    if parts.len() < 2 {
+        return Ok(None);
+    }
+    if parts.iter().any(|p| extract_counter_date_range(p).is_some()) {
+        return Ok(None);
+    }
+    let mut preds = Vec::with_capacity(parts.len());
+    for part in parts {
+        let pred = match compile_fused_pred(table, part) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+        preds.push(pred);
+    }
+    let mut mask = Vec::with_capacity(row_count);
+    for i in 0..row_count {
+        mask.push(preds.iter().all(|p| p.eval(i)));
+    }
+    Ok(Some(mask))
+}
+
+fn compile_fused_pred<'a>(table: &'a Table, expr: &'a Expr) -> Result<FusedPred<'a>> {
+    if let Expr::Like {
+        negated,
+        expr: inner,
+        pattern,
+        ..
+    } = expr
+    {
+        let name = expr_column_name(inner).ok_or_else(|| crate::Error::msg("like col"))?;
+        let col = table.column(&name)?;
+        let ColumnData::Utf8(data) = col else {
+            return Err(crate::Error::msg("like on non-utf8"));
+        };
+        let Expr::Value(v) = &**pattern else {
+            return Err(crate::Error::msg("like pattern"));
+        };
+        return Ok(FusedPred::Utf8Like {
+            data,
+            pattern: string_lit(v)?,
+            negated: *negated,
+        });
+    }
+    if let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::NotEq,
+        right,
+    } = expr
+    {
+        let name = expr_column_name(left).ok_or_else(|| crate::Error::msg("neq col"))?;
+        if let Expr::Value(v) = &**right {
+            if let Ok(s) = string_lit(v) {
+                if s.is_empty() {
+                    let col = table.column(&name)?;
+                    return Ok(match col {
+                        ColumnData::Utf8(data) => FusedPred::Utf8NeEmpty(data),
+                        _ => return Err(crate::Error::msg("neq empty on non-utf8")),
+                    });
+                }
+            }
+            if let Ok(0) = value_as_i64(v) {
+                let col = table.column(&name)?;
+                return Ok(match col {
+                    ColumnData::Int16(v) => FusedPred::IntNeZeroInt16(v),
+                    ColumnData::Int32(v) => FusedPred::IntNeZeroInt32(v),
+                    ColumnData::Int64(v) => FusedPred::IntNeZeroInt64(v),
+                    _ => return Err(crate::Error::msg("neq zero on non-int")),
+                });
+            }
+        }
+    }
+    Err(crate::Error::msg("unsupported fused pred"))
 }
 
 fn and_masks_inplace(a: &mut [bool], b: &[bool]) {

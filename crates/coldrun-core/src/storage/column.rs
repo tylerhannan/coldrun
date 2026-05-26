@@ -161,16 +161,28 @@ impl ColumnData {
     }
 
     pub fn read_file(path: &Path) -> Result<Self> {
-        let mut file = File::open(path)?;
-        let len = file.metadata()?.len() as usize;
-        if len > 64 * 1024 {
-            let map = unsafe { memmap2::Mmap::map(&file)? };
-            return decode_column_file(&map[..]);
-        }
+        let (col_type, payload) = open_column_payload(path)?;
+        decode_column_payload_typed(&payload, col_type)
+    }
 
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
-        decode_column_file(&data)
+    /// Read formatted cell strings at row indices without materializing the full column.
+    pub fn read_cells_at(path: &Path, rows: &[usize]) -> Result<Vec<String>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (col_type, payload) = open_column_payload(path)?;
+        decode_cells_at(&payload, col_type, rows)
+    }
+
+    pub fn cell_to_string(col: &ColumnData, row: usize) -> String {
+        match col {
+            ColumnData::Int64(v) => v[row].to_string(),
+            ColumnData::Int32(v) => v[row].to_string(),
+            ColumnData::Int16(v) => v[row].to_string(),
+            ColumnData::Date(v) => v[row].to_string(),
+            ColumnData::Timestamp(v) => v[row].to_string(),
+            ColumnData::Utf8(v) => v[row].clone(),
+        }
     }
 
     pub fn extend_from(&mut self, other: &ColumnData) -> Result<()> {
@@ -189,7 +201,16 @@ impl ColumnData {
     }
 }
 
-fn decode_column_file(data: &[u8]) -> Result<ColumnData> {
+fn open_column_payload(path: &Path) -> Result<(ColumnType, Vec<u8>)> {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len() as usize;
+    let data = if len > 64 * 1024 {
+        unsafe { memmap2::Mmap::map(&file)? }.to_vec()
+    } else {
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+        buf
+    };
     if data.len() < 5 {
         return Err(crate::Error::msg("column file too short"));
     }
@@ -205,39 +226,120 @@ fn decode_column_file(data: &[u8]) -> Result<ColumnData> {
     } else {
         (parse_col_type(first)?, ENC_RAW, &data[5..])
     };
-
     let payload = if encoding == ENC_LZ4 {
         lz4_flex::decompress_size_prepended(body)
             .map_err(|e| crate::Error::msg(format!("lz4 decompress: {e}")))?
     } else {
         body.to_vec()
     };
+    Ok((col_type, payload))
+}
 
-    let mut cursor = std::io::Cursor::new(payload);
-    let mut count_buf = [0u8; 8];
-    std::io::Read::read_exact(&mut cursor, &mut count_buf)?;
-    let count = u64::from_le_bytes(count_buf) as usize;
+fn decode_column_payload_typed(payload: &[u8], col_type: ColumnType) -> Result<ColumnData> {
+    if payload.len() < 8 {
+        return Err(crate::Error::msg("column payload truncated"));
+    }
+    let count = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+    let body = &payload[8..];
     Ok(match col_type {
-        ColumnType::Int64 => ColumnData::Int64(read_pod_arc(&mut cursor, count)?),
-        ColumnType::Int32 => ColumnData::Int32(read_pod_arc(&mut cursor, count)?),
-        ColumnType::Int16 => ColumnData::Int16(read_pod_arc(&mut cursor, count)?),
-        ColumnType::Date => ColumnData::Date(read_pod_arc(&mut cursor, count)?),
-        ColumnType::Timestamp => ColumnData::Timestamp(read_pod_arc(&mut cursor, count)?),
-        ColumnType::Utf8 => {
-            let mut strings = Vec::with_capacity(count);
-            for _ in 0..count {
-                let mut len_buf = [0u8; 4];
-                std::io::Read::read_exact(&mut cursor, &mut len_buf)?;
-                let len = u32::from_le_bytes(len_buf) as usize;
-                let mut bytes = vec![0u8; len];
-                std::io::Read::read_exact(&mut cursor, &mut bytes)?;
-                strings.push(String::from_utf8(bytes).map_err(|e| {
-                    crate::Error::msg(format!("invalid utf8 in column: {e}"))
-                })?);
-            }
-            ColumnData::Utf8(strings)
-        }
+        ColumnType::Int64 => ColumnData::Int64(read_pod_slice(body, count)?),
+        ColumnType::Int32 => ColumnData::Int32(read_pod_slice(body, count)?),
+        ColumnType::Int16 => ColumnData::Int16(read_pod_slice(body, count)?),
+        ColumnType::Date => ColumnData::Date(read_pod_slice(body, count)?),
+        ColumnType::Timestamp => ColumnData::Timestamp(read_pod_slice(body, count)?),
+        ColumnType::Utf8 => ColumnData::Utf8(read_utf8_vec(body, count)?),
     })
+}
+
+fn decode_cells_at(payload: &[u8], col_type: ColumnType, rows: &[usize]) -> Result<Vec<String>> {
+    if payload.len() < 8 {
+        return Err(crate::Error::msg("column payload truncated"));
+    }
+    let count = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+    let body = &payload[8..];
+    rows.iter()
+        .map(|&row| {
+            if row >= count {
+                return Err(crate::Error::msg("row index out of range"));
+            }
+            format_cell_at(body, col_type, row, count)
+        })
+        .collect()
+}
+
+fn format_cell_at(body: &[u8], col_type: ColumnType, row: usize, count: usize) -> Result<String> {
+    Ok(match col_type {
+        ColumnType::Int64 => read_pod_at::<i64>(body, row)?.to_string(),
+        ColumnType::Int32 => read_pod_at::<i32>(body, row)?.to_string(),
+        ColumnType::Int16 => read_pod_at::<i16>(body, row)?.to_string(),
+        ColumnType::Date => read_pod_at::<i32>(body, row)?.to_string(),
+        ColumnType::Timestamp => read_pod_at::<i64>(body, row)?.to_string(),
+        ColumnType::Utf8 => read_utf8_at(body, row, count)?,
+    })
+}
+
+fn read_pod_at<T: Copy>(body: &[u8], row: usize) -> Result<T> {
+    let size = size_of::<T>();
+    let off = row * size;
+    if off + size > body.len() {
+        return Err(crate::Error::msg("pod row out of range"));
+    }
+    Ok(unsafe { std::ptr::read_unaligned(body.as_ptr().add(off) as *const T) })
+}
+
+fn read_pod_slice<T: Copy>(body: &[u8], count: usize) -> Result<PodStorage<T>> {
+    let byte_len = count * size_of::<T>();
+    if byte_len > body.len() {
+        return Err(crate::Error::msg("column payload truncated"));
+    }
+    let mut vec = Vec::with_capacity(count);
+    unsafe {
+        let ptr = body.as_ptr() as *const T;
+        vec.extend_from_slice(std::slice::from_raw_parts(ptr, count));
+    }
+    Ok(PodStorage::from_arc(Arc::from(vec.into_boxed_slice())))
+}
+
+fn read_utf8_vec(body: &[u8], count: usize) -> Result<Vec<String>> {
+    let mut strings = Vec::with_capacity(count);
+    let mut pos = 0usize;
+    for _ in 0..count {
+        if pos + 4 > body.len() {
+            return Err(crate::Error::msg("utf8 payload truncated"));
+        }
+        let len = u32::from_le_bytes(body[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + len > body.len() {
+            return Err(crate::Error::msg("utf8 payload truncated"));
+        }
+        strings.push(
+            String::from_utf8(body[pos..pos + len].to_vec())
+                .map_err(|e| crate::Error::msg(format!("invalid utf8 in column: {e}")))?,
+        );
+        pos += len;
+    }
+    Ok(strings)
+}
+
+fn read_utf8_at(body: &[u8], mut row: usize, count: usize) -> Result<String> {
+    let mut pos = 0usize;
+    for _ in 0..count {
+        if pos + 4 > body.len() {
+            return Err(crate::Error::msg("utf8 payload truncated"));
+        }
+        let len = u32::from_le_bytes(body[pos..pos + 4].try_into().unwrap()) as usize;
+        if row == 0 {
+            pos += 4;
+            if pos + len > body.len() {
+                return Err(crate::Error::msg("utf8 payload truncated"));
+            }
+            return String::from_utf8(body[pos..pos + len].to_vec())
+                .map_err(|e| crate::Error::msg(format!("invalid utf8 in column: {e}")));
+        }
+        pos += 4 + len;
+        row -= 1;
+    }
+    Err(crate::Error::msg("row index out of range"))
 }
 
 fn parse_col_type(tag: u8) -> Result<ColumnType> {
@@ -256,25 +358,6 @@ fn write_pod_vec<T: Copy>(out: &mut Vec<u8>, data: &[T]) {
     let bytes =
         unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * size_of::<T>()) };
     out.extend_from_slice(bytes);
-}
-
-fn read_pod_arc<T: Copy>(
-    cursor: &mut std::io::Cursor<Vec<u8>>,
-    count: usize,
-) -> Result<PodStorage<T>> {
-    let byte_len = count * size_of::<T>();
-    let pos = cursor.position() as usize;
-    let buf = cursor.get_ref();
-    if pos + byte_len > buf.len() {
-        return Err(crate::Error::msg("column payload truncated"));
-    }
-    let mut vec = Vec::with_capacity(count);
-    unsafe {
-        let ptr = buf.as_ptr().add(pos) as *const T;
-        vec.extend_from_slice(std::slice::from_raw_parts(ptr, count));
-    }
-    cursor.set_position((pos + byte_len) as u64);
-    Ok(PodStorage::from_arc(Arc::from(vec.into_boxed_slice())))
 }
 
 pub fn empty_column(ty: ColumnType) -> ColumnData {

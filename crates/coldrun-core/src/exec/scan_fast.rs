@@ -2,13 +2,14 @@
 
 use sqlparser::ast::{BinaryOperator, Expr, Value};
 
+use crate::expr::eval_like_match;
 use crate::sql::{expr_column_name, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, Table};
 use crate::Result;
 
 use super::filter::build_filter_mask;
 use super::QueryResult;
-use super::{col_key, projection_label};
+use super::projection_label;
 
 pub fn try_execute_scan_fast(
     table: &mut Table,
@@ -33,7 +34,21 @@ pub fn try_execute_scan_fast(
     let sel_name = expr_column_name(sel_expr).ok_or_else(|| crate::Error::msg("scan col"))?;
 
     match parsed.order_by.len() {
-        1 => try_scan_single_order(table, parsed, row_count, proj, &sel_name),
+        1 => {
+            let (order_expr, _) = &parsed.order_by[0];
+            let order_name = order_column_name(order_expr);
+            if order_name != sel_name {
+                return try_scan_order_different_col(
+                    table,
+                    parsed,
+                    row_count,
+                    proj,
+                    &sel_name,
+                    &order_name,
+                );
+            }
+            try_scan_single_order(table, parsed, row_count, proj, &sel_name)
+        }
         2 => try_scan_two_order(table, parsed, row_count, proj, &sel_name),
         _ => Ok(None),
     }
@@ -55,14 +70,35 @@ fn try_scan_single_order(
 
     let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
     let col = table.column(sel_name)?;
-    let mut indices = indices_from_mask(&mask);
-    sort_indices_by_column(col, &mut indices, *desc);
+    let mut indices = select_indices_for_where(table, parsed.where_expr.as_ref(), row_count, &mask)?;
+    partial_or_full_sort_indices(col, &mut indices, parsed, *desc);
     Ok(Some(build_scan_result(
         proj,
         col,
         &indices,
         parsed,
     )?))
+}
+
+/// Q25: `SELECT SearchPhrase … WHERE SearchPhrase <> '' ORDER BY EventTime LIMIT n`.
+fn try_scan_order_different_col(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+    proj: &crate::sql::SelectProjection,
+    sel_name: &str,
+    order_name: &str,
+) -> Result<Option<QueryResult>> {
+    let (order_expr, desc) = &parsed.order_by[0];
+    if order_column_name(order_expr) != order_name {
+        return Ok(None);
+    }
+    let order_col = table.column(order_name)?;
+    let sel_col = table.column(sel_name)?;
+    let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
+    let mut indices = select_indices_for_where(table, parsed.where_expr.as_ref(), row_count, &mask)?;
+    partial_or_full_sort_indices(order_col, &mut indices, parsed, *desc);
+    Ok(Some(build_scan_result(proj, sel_col, &indices, parsed)?))
 }
 
 /// Q27: `SELECT SearchPhrase … ORDER BY EventTime, SearchPhrase`.
@@ -84,8 +120,8 @@ fn try_scan_two_order(
     let col1 = table.column(&n1)?;
     let col2 = table.column(&n2)?;
     let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
-    let mut indices = indices_from_mask(&mask);
-    sort_indices_two(col1, col2, &mut indices, *d1, *d2);
+    let mut indices = select_indices_for_where(table, parsed.where_expr.as_ref(), row_count, &mask)?;
+    partial_or_full_sort_indices_two(col1, col2, &mut indices, parsed, *d1, *d2);
 
     let out_col = table.column(sel_name)?;
     Ok(Some(build_scan_result(proj, out_col, &indices, parsed)?))
@@ -112,9 +148,12 @@ fn try_scan_star_like_order_limit(
         return Ok(None);
     }
 
-    let mask = build_filter_mask(table, Some(where_expr), row_count)?;
+    let ColumnData::Utf8(urls) = table.column("URL")? else {
+        return Ok(None);
+    };
+    let pattern = url_like_pattern(where_expr)?;
+    let mut indices = indices_from_utf8_like(urls, &pattern, row_count);
     let time_col = table.column("EventTime")?;
-    let mut indices = indices_from_mask(&mask);
 
     let offset = parsed.offset.unwrap_or(0) as usize;
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(indices.len());
@@ -127,26 +166,9 @@ fn try_scan_star_like_order_limit(
     }
     let slice: Vec<usize> = indices.into_iter().skip(offset).take(limit).collect();
 
-    let missing_names = table.unload_columns();
-    if !missing_names.is_empty() {
-        let refs: Vec<&str> = missing_names.iter().map(String::as_str).collect();
-        table.load_columns(&refs)?;
-    }
+    let (names, rows) = table.project_rows(&slice)?;
 
-    let names: Vec<String> = table.column_names().map(|s| s.to_string()).collect();
-    let mut rows = Vec::with_capacity(slice.len());
-    for i in slice {
-        let mut row = Vec::with_capacity(names.len());
-        for name in &names {
-            row.push(col_key(table.column(name)?, i));
-        }
-        rows.push(row);
-    }
-
-    Ok(Some(QueryResult {
-        columns: names,
-        rows,
-    }))
+    Ok(Some(QueryResult { columns: names, rows }))
 }
 
 fn where_is_url_like(expr: &Expr) -> bool {
@@ -247,6 +269,48 @@ fn indices_from_mask(mask: &[bool]) -> Vec<usize> {
         .collect()
 }
 
+/// Avoid a 100k `bool` allocation when WHERE is a single `utf8 <> ''` predicate.
+fn select_indices_for_where(
+    table: &Table,
+    where_expr: Option<&Expr>,
+    row_count: usize,
+    mask: &[bool],
+) -> Result<Vec<usize>> {
+    if let Some(name) = utf8_ne_empty_column(where_expr) {
+        if let Ok(ColumnData::Utf8(data)) = table.column(&name).map(|c| c) {
+            return Ok(data
+                .iter()
+                .take(row_count)
+                .enumerate()
+                .filter(|(_, s)| !s.is_empty())
+                .map(|(i, _)| i)
+                .collect());
+        }
+    }
+    Ok(indices_from_mask(mask))
+}
+
+fn utf8_ne_empty_column(expr: Option<&Expr>) -> Option<String> {
+    let expr = expr?;
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::NotEq,
+        right,
+    } = expr
+    else {
+        return None;
+    };
+    let name = expr_column_name(left)?;
+    let Expr::Value(Value::SingleQuotedString(s)) = &**right else {
+        return None;
+    };
+    if s.is_empty() {
+        Some(name)
+    } else {
+        None
+    }
+}
+
 fn build_scan_result(
     proj: &crate::sql::SelectProjection,
     col: &ColumnData,
@@ -269,7 +333,7 @@ fn build_scan_result(
     let label = projection_label(proj);
     let rows: Vec<Vec<String>> = slice
         .iter()
-        .map(|&i| vec![col_key(col, i)])
+        .map(|&i| vec![ColumnData::cell_to_string(col, i)])
         .collect();
 
     Ok(QueryResult {
@@ -278,17 +342,106 @@ fn build_scan_result(
     })
 }
 
-fn partial_sort_indices_by_timestamp(col: &ColumnData, indices: &mut [usize], need: usize) {
-    let ColumnData::Timestamp(v) = col else {
-        sort_indices_by_column(col, indices, false);
-        return;
-    };
+fn url_like_pattern(expr: &Expr) -> Result<String> {
+    match expr {
+        Expr::Like { pattern, .. } => match &**pattern {
+            Expr::Value(Value::SingleQuotedString(s))
+            | Expr::Value(Value::DoubleQuotedString(s)) => Ok(s.clone()),
+            _ => Err(crate::Error::msg("like pattern")),
+        },
+        Expr::Nested(e) => url_like_pattern(e),
+        _ => Err(crate::Error::msg("url like")),
+    }
+}
+
+fn indices_from_utf8_like(data: &[String], pattern: &str, row_count: usize) -> Vec<usize> {
+    data.iter()
+        .take(row_count)
+        .enumerate()
+        .filter_map(|(i, s)| eval_like_match(s, pattern).then_some(i))
+        .collect()
+}
+
+fn partial_or_full_sort_indices(
+    col: &ColumnData,
+    indices: &mut Vec<usize>,
+    parsed: &ParsedQuery,
+    desc: bool,
+) {
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(indices.len());
+    let need = offset.saturating_add(limit);
+    if need > 0 && need < indices.len() {
+        partial_sort_indices_by_column(col, indices, need, desc);
+        indices.truncate(need);
+    } else {
+        sort_indices_by_column(col, indices, desc);
+    }
+}
+
+fn partial_or_full_sort_indices_two(
+    col1: &ColumnData,
+    col2: &ColumnData,
+    indices: &mut Vec<usize>,
+    parsed: &ParsedQuery,
+    desc1: bool,
+    desc2: bool,
+) {
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(indices.len());
+    let need = offset.saturating_add(limit);
+    if need > 0 && need < indices.len() {
+        partial_sort_indices_two(col1, col2, indices, need, desc1, desc2);
+        indices.truncate(need);
+    } else {
+        sort_indices_two(col1, col2, indices, desc1, desc2);
+    }
+}
+
+fn partial_sort_indices_by_column(col: &ColumnData, indices: &mut [usize], need: usize, desc: bool) {
     if indices.len() <= need {
-        sort_indices_by_column(col, indices, false);
+        sort_indices_by_column(col, indices, desc);
         return;
     }
-    indices.select_nth_unstable_by(need - 1, |&a, &b| v[a].cmp(&v[b]));
-    indices[..need].sort_by(|&a, &b| v[a].cmp(&v[b]));
+    if desc {
+        indices.select_nth_unstable_by(need - 1, |&a, &b| cmp_at(col, b, a, false));
+        indices[..need].sort_by(|&a, &b| cmp_at(col, b, a, false));
+    } else {
+        indices.select_nth_unstable_by(need - 1, |&a, &b| cmp_at(col, a, b, false));
+        indices[..need].sort_by(|&a, &b| cmp_at(col, a, b, false));
+    }
+}
+
+fn partial_sort_indices_two(
+    col1: &ColumnData,
+    col2: &ColumnData,
+    indices: &mut [usize],
+    need: usize,
+    desc1: bool,
+    desc2: bool,
+) {
+    if indices.len() <= need {
+        sort_indices_two(col1, col2, indices, desc1, desc2);
+        return;
+    }
+    indices.select_nth_unstable_by(need - 1, |&a, &b| {
+        let c1 = cmp_at(col1, a, b, desc1);
+        if c1 != std::cmp::Ordering::Equal {
+            return c1;
+        }
+        cmp_at(col2, a, b, desc2)
+    });
+    indices[..need].sort_by(|&a, &b| {
+        let c1 = cmp_at(col1, a, b, desc1);
+        if c1 != std::cmp::Ordering::Equal {
+            return c1;
+        }
+        cmp_at(col2, a, b, desc2)
+    });
+}
+
+fn partial_sort_indices_by_timestamp(col: &ColumnData, indices: &mut [usize], need: usize) {
+    partial_sort_indices_by_column(col, indices, need, false);
 }
 
 fn sort_indices_by_column(col: &ColumnData, indices: &mut [usize], desc: bool) {

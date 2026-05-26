@@ -59,6 +59,16 @@ pub fn try_execute_global(
         }
     }
 
+    // Q21: `COUNT(*) WHERE URL LIKE '%…%'` — scan URL column only, no mask alloc.
+    if let Some(n) = try_count_utf8_like(table, parsed.where_expr.as_ref(), row_count)? {
+        if matches!(proj.kind, SelectItemKind::CountAll | SelectItemKind::Count(_)) {
+            return Ok(Some(QueryResult {
+                columns: vec![col_name],
+                rows: vec![vec![n.to_string()]],
+            }));
+        }
+    }
+
     let mask = build_filter_mask(&table, parsed.where_expr.as_ref(), row_count)?;
     let selected = count_selected(&mask);
 
@@ -320,6 +330,45 @@ fn try_count_int_nonzero(
         _ => return Ok(None),
     };
     Ok(Some(count))
+}
+
+fn try_count_utf8_like(
+    table: &Table,
+    where_expr: Option<&Expr>,
+    row_count: usize,
+) -> Result<Option<u64>> {
+    let Some(expr) = where_expr else {
+        return Ok(None);
+    };
+    let Expr::Like {
+        expr: inner,
+        pattern,
+        negated: false,
+        ..
+    } = expr
+    else {
+        return Ok(None);
+    };
+    let Some(name) = expr_column_name(inner) else {
+        return Ok(None);
+    };
+    let Expr::Value(v) = &**pattern else {
+        return Ok(None);
+    };
+    let pat = match v {
+        Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.as_str(),
+        _ => return Ok(None),
+    };
+    let col = table.column(&name)?;
+    let ColumnData::Utf8(data) = col else {
+        return Ok(None);
+    };
+    let n = data
+        .iter()
+        .take(row_count)
+        .filter(|s| crate::expr::eval_like_match(s, pat))
+        .count() as u64;
+    Ok(Some(n))
 }
 
 fn count_selected(mask: &[bool]) -> u64 {

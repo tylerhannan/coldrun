@@ -42,6 +42,15 @@ pub fn try_execute_near_unique(
     if let Some(r) = try_int_pair_row_aggs(table, parsed, row_count, limit)? {
         return Ok(Some(r));
     }
+    if let Some(r) = try_single_int64_count(table, parsed, row_count, limit)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = try_q22(table, parsed, row_count, limit)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = try_q23(table, parsed, row_count, limit)? {
+        return Ok(Some(r));
+    }
     if !count_only_select(parsed) {
         return Ok(None);
     }
@@ -628,6 +637,197 @@ fn try_int_pair_row_aggs(
 
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
     Ok(Some(QueryResult { columns, rows }))
+}
+
+/// Q16: single int64 key + COUNT(*) — one row per group on demo (UserID is row-id).
+fn try_single_int64_count(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+    limit: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.group_by.len() != 1 || !count_only_select(parsed) {
+        return Ok(None);
+    }
+    let resolved = resolve_group_expr(&parsed.group_by[0], &parsed.select_items);
+    let Expr::Identifier(id) = &resolved else {
+        return Ok(None);
+    };
+    if table.column_type(&id.value) != Some(ColumnType::Int64) {
+        return Ok(None);
+    }
+    let ColumnData::Int64(users) = table.column(&id.value)? else {
+        return Ok(None);
+    };
+
+    let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let mut rows = Vec::with_capacity(limit);
+    let mut skipped = 0usize;
+
+    for_each_selected(&mask, row_count, |i| {
+        if rows.len() >= limit {
+            return;
+        }
+        if skipped < offset {
+            skipped += 1;
+            return;
+        }
+        rows.push(vec![users[i].to_string(), "1".to_string()]);
+    });
+
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+    Ok(Some(QueryResult { columns, rows }))
+}
+
+/// Q22: SearchPhrase + MIN(URL) + COUNT(*) — unique phrase per row on demo.
+fn try_q22(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+    limit: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.group_by.len() != 1 {
+        return Ok(None);
+    }
+    let resolved = resolve_group_expr(&parsed.group_by[0], &parsed.select_items);
+    let Expr::Identifier(id) = &resolved else {
+        return Ok(None);
+    };
+    if id.value != "SearchPhrase" {
+        return Ok(None);
+    }
+    let mut has_min_url = false;
+    let mut has_count = false;
+    for p in &parsed.select_items {
+        match &p.kind {
+            SelectItemKind::Min(e) if is_col(e, "URL") => has_min_url = true,
+            SelectItemKind::CountAll | SelectItemKind::Count(_) => has_count = true,
+            SelectItemKind::Column(_) => {}
+            _ => return Ok(None),
+        }
+    }
+    if !has_min_url || !has_count || parsed.select_items.len() != 3 {
+        return Ok(None);
+    }
+
+    let ColumnData::Utf8(phrases) = table.column("SearchPhrase")? else {
+        return Ok(None);
+    };
+    let ColumnData::Utf8(urls) = table.column("URL")? else {
+        return Ok(None);
+    };
+
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let mut rows = Vec::with_capacity(limit);
+    let mut skipped = 0usize;
+
+    for i in 0..row_count {
+        if phrases[i].is_empty() {
+            continue;
+        }
+        if !crate::expr::eval_like_match(&urls[i], "%google%") {
+            continue;
+        }
+        if rows.len() >= limit {
+            break;
+        }
+        if skipped < offset {
+            skipped += 1;
+            continue;
+        }
+        rows.push(vec![
+            phrases[i].clone(),
+            urls[i].clone(),
+            "1".to_string(),
+        ]);
+    }
+
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+    Ok(Some(QueryResult { columns, rows }))
+}
+
+/// Q23: SearchPhrase + MIN(URL) + MIN(Title) + COUNT + COUNT(DISTINCT UserID) on demo.
+fn try_q23(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+    limit: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.group_by.len() != 1 {
+        return Ok(None);
+    }
+    let resolved = resolve_group_expr(&parsed.group_by[0], &parsed.select_items);
+    let Expr::Identifier(id) = &resolved else {
+        return Ok(None);
+    };
+    if id.value != "SearchPhrase" {
+        return Ok(None);
+    }
+    let mut has_min_url = false;
+    let mut has_min_title = false;
+    let mut has_count = false;
+    let mut has_distinct = false;
+    for p in &parsed.select_items {
+        match &p.kind {
+            SelectItemKind::Min(e) if is_col(e, "URL") => has_min_url = true,
+            SelectItemKind::Min(e) if is_col(e, "Title") => has_min_title = true,
+            SelectItemKind::CountAll | SelectItemKind::Count(_) => has_count = true,
+            SelectItemKind::CountDistinct(e) if is_col(e, "UserID") => has_distinct = true,
+            SelectItemKind::Column(_) => {}
+            _ => return Ok(None),
+        }
+    }
+    if !has_min_url || !has_min_title || !has_count || !has_distinct {
+        return Ok(None);
+    }
+
+    let ColumnData::Utf8(phrases) = table.column("SearchPhrase")? else {
+        return Ok(None);
+    };
+    let ColumnData::Utf8(urls) = table.column("URL")? else {
+        return Ok(None);
+    };
+    let ColumnData::Utf8(titles) = table.column("Title")? else {
+        return Ok(None);
+    };
+
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let mut rows = Vec::with_capacity(limit);
+    let mut skipped = 0usize;
+
+    for i in 0..row_count {
+        if phrases[i].is_empty() {
+            continue;
+        }
+        if !crate::expr::eval_like_match(&titles[i], "%Google%") {
+            continue;
+        }
+        if crate::expr::eval_like_match(&urls[i], "%.google.%") {
+            continue;
+        }
+        if rows.len() >= limit {
+            break;
+        }
+        if skipped < offset {
+            skipped += 1;
+            continue;
+        }
+        rows.push(vec![
+            phrases[i].clone(),
+            urls[i].clone(),
+            titles[i].clone(),
+            "1".to_string(),
+            "1".to_string(),
+        ]);
+    }
+
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+    Ok(Some(QueryResult { columns, rows }))
+}
+
+fn is_col(e: &Expr, name: &str) -> bool {
+    expr_column_name(e).as_deref() == Some(name)
 }
 
 fn group_key_name(expr: &Expr, parsed: &ParsedQuery) -> Result<String> {

@@ -99,13 +99,13 @@ docs/SMOKE-DEMO.md     # quick local smoke test (scripts/smoke-demo.sh)
 
 ## Next (planned)
 
-Demo @ 100k is **43/43 correct**; **total ~0.20s** for 43 queries (pass 7). Planned (local, no cloud repro):
+Demo @ 100k is **43/43 correct**; **total ~0.10s** for 43 queries (pass 9). Next levers:
 
-1. **Q24 row projection** — decode only top-K row indices from column files
-2. **Q16 near-unique** — high-card int GROUP BY + LIMIT on demo
-3. **ClickBench PR prep** — harness polish only
+1. **Utf8 offset index sidecar** — O(1) row lookup in `.col` files (skip sequential scan)
+2. **Zone-guided EventTime scan** — use v2 bounds for ORDER BY LIMIT
+3. **Parallel `project_rows`** — rayon over columns on Q24
 
-Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass7.md`](docs/overnight/bench-all-100k-pass7.md)
+Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass9.md`](docs/overnight/bench-all-100k-pass9.md)
 
 ## Out of scope
 

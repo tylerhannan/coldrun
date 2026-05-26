@@ -10,6 +10,7 @@ use crate::Result;
 
 pub const ZONE_ROWS: usize = 8192;
 pub const ZONE_VERSION_V1: u32 = 1;
+pub const ZONE_VERSION_V2: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Zone {
@@ -24,6 +25,19 @@ pub struct Zone {
     pub min_adv: i16,
     #[serde(default = "adv_max_unknown")]
     pub max_adv: i16,
+    /// EventTime bounds per zone (v2) for ORDER BY / time-range pruning.
+    #[serde(default = "event_time_min_unknown")]
+    pub min_event_time: i64,
+    #[serde(default = "event_time_max_unknown")]
+    pub max_event_time: i64,
+}
+
+fn event_time_min_unknown() -> i64 {
+    i64::MAX
+}
+
+fn event_time_max_unknown() -> i64 {
+    i64::MIN
 }
 
 fn adv_min_unknown() -> i16 {
@@ -49,6 +63,7 @@ impl ZoneIndex {
             return None;
         };
         let adv = table.column("AdvEngineID").ok();
+        let event_time = table.column("EventTime").ok();
         let n = counters.len().min(dates.len());
         if n == 0 {
             return None;
@@ -75,6 +90,20 @@ impl ZoneIndex {
             } else {
                 (0, 0, 0)
             };
+            let (min_event_time, max_event_time) =
+                if let Some(ColumnData::Timestamp(ts_col)) = event_time {
+                    let slice_t = &ts_col[z..end.min(ts_col.len())];
+                    if slice_t.is_empty() {
+                        (i64::MAX, i64::MIN)
+                    } else {
+                        (
+                            *slice_t.iter().min().unwrap_or(&i64::MAX),
+                            *slice_t.iter().max().unwrap_or(&i64::MIN),
+                        )
+                    }
+                } else {
+                    (i64::MAX, i64::MIN)
+                };
             zones.push(Zone {
                 min_counter: *slice_c.iter().min().unwrap_or(&0),
                 max_counter: *slice_c.iter().max().unwrap_or(&0),
@@ -83,10 +112,14 @@ impl ZoneIndex {
                 adv_nonzero,
                 min_adv,
                 max_adv,
+                min_event_time,
+                max_event_time,
             });
             z = end;
         }
-        let version = if adv.is_some() {
+        let version = if event_time.is_some() {
+            ZONE_VERSION_V2
+        } else if adv.is_some() {
             ZONE_VERSION_V1
         } else {
             0
@@ -240,6 +273,8 @@ fn _read_bin(path: &Path) -> Result<ZoneIndex> {
             adv_nonzero: 0,
             min_adv: 0,
             max_adv: 0,
+            min_event_time: i64::MAX,
+            max_event_time: i64::MIN,
         });
     }
     Ok(ZoneIndex {
