@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use ahash::AHashSet;
 
 use sqlparser::ast::Expr;
 
@@ -20,6 +20,9 @@ pub fn try_execute_global(
     }
 
     if parsed.select_items.len() > 1 {
+        if let Some(r) = try_execute_global_minmax_pair(table, parsed, row_count)? {
+            return Ok(Some(r));
+        }
         if let Some(r) = try_execute_global_multi_distinct(table, parsed, row_count)? {
             return Ok(Some(r));
         }
@@ -83,6 +86,46 @@ pub fn try_execute_global(
         _ => {}
     }
     Ok(None)
+}
+
+/// Q7: `SELECT MIN(EventDate), MAX(EventDate)` in one pass.
+fn try_execute_global_minmax_pair(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.select_items.len() != 2 {
+        return Ok(None);
+    }
+    let mut min_expr = None;
+    let mut max_expr = None;
+    for proj in &parsed.select_items {
+        match &proj.kind {
+            SelectItemKind::Min(e) => min_expr = Some((proj, e)),
+            SelectItemKind::Max(e) => max_expr = Some((proj, e)),
+            _ => return Ok(None),
+        }
+    }
+    let (min_proj, min_e, max_proj, max_e) = match (min_expr, max_expr) {
+        (Some((mp, me)), Some((xp, xe))) => (mp, me, xp, xe),
+        _ => return Ok(None),
+    };
+
+    let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
+    let Some(min_v) = minmax_column_masked(table, min_e, &mask, false) else {
+        return Ok(None);
+    };
+    let Some(max_v) = minmax_column_masked(table, max_e, &mask, true) else {
+        return Ok(None);
+    };
+
+    Ok(Some(QueryResult {
+        columns: vec![
+            projection_label(min_proj),
+            projection_label(max_proj),
+        ],
+        rows: vec![vec![min_v, max_v]],
+    }))
 }
 
 /// One mask pass for Q3-style `SELECT SUM(..), COUNT(*), AVG(..)` on int columns.
@@ -193,7 +236,7 @@ fn count_distinct_col_masked(table: &Table, name: &str, mask: &[bool]) -> Option
     let col = table.column(name).ok()?;
     match col {
         ColumnData::Int64(v) => {
-            let mut set = HashSet::new();
+            let mut set = AHashSet::new();
             for (i, &x) in v.iter().enumerate() {
                 if mask.get(i).copied().unwrap_or(false) {
                     set.insert(x);
@@ -202,7 +245,7 @@ fn count_distinct_col_masked(table: &Table, name: &str, mask: &[bool]) -> Option
             Some(set.len() as u64)
         }
         ColumnData::Int32(v) => {
-            let mut set = HashSet::new();
+            let mut set = AHashSet::new();
             for (i, &x) in v.iter().enumerate() {
                 if mask.get(i).copied().unwrap_or(false) {
                     set.insert(i64::from(x));
@@ -211,7 +254,7 @@ fn count_distinct_col_masked(table: &Table, name: &str, mask: &[bool]) -> Option
             Some(set.len() as u64)
         }
         ColumnData::Int16(v) => {
-            let mut set = HashSet::new();
+            let mut set = AHashSet::new();
             for (i, &x) in v.iter().enumerate() {
                 if mask.get(i).copied().unwrap_or(false) {
                     set.insert(i64::from(x));
@@ -220,7 +263,7 @@ fn count_distinct_col_masked(table: &Table, name: &str, mask: &[bool]) -> Option
             Some(set.len() as u64)
         }
         ColumnData::Utf8(v) => {
-            let mut set = HashSet::<String>::new();
+            let mut set = AHashSet::<String>::new();
             for (i, s) in v.iter().enumerate() {
                 if mask.get(i).copied().unwrap_or(false) {
                     set.insert(s.clone());
