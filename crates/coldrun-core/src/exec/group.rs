@@ -9,6 +9,7 @@ use crate::Result;
 
 use super::aggregate::AggState;
 use super::filter::build_filter_mask;
+use super::mask_util::{mask_is_sparse, selected_indices};
 use super::group_int::{apply_limit_offset, try_execute_grouped_int};
 use super::topk::truncate_to_top_k;
 use super::QueryResult;
@@ -32,10 +33,13 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
     let mut groups: HashMap<Vec<String>, GroupBucket> =
         HashMap::with_capacity((selected / 8).max(16));
 
-    for i in 0..row_count {
-        if !mask[i] {
-            continue;
-        }
+    let row_iter: Vec<usize> = if mask_is_sparse(&mask) {
+        selected_indices(&mask)
+    } else {
+        (0..row_count).filter(|&i| mask[i]).collect()
+    };
+
+    for i in row_iter {
         let mut key = Vec::with_capacity(parsed.group_by.len());
         for expr in &parsed.group_by {
             let resolved = resolve_group_expr(expr, &parsed.select_items);

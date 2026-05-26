@@ -10,6 +10,7 @@ use crate::Result;
 
 use super::aggregate::AggState;
 use super::filter::build_filter_mask;
+use super::mask_util::{mask_is_sparse, selected_indices};
 use super::group::{
     eval_proj_at_row, is_aggregate, is_group_key_proj, resolve_group_expr, sort_rows,
 };
@@ -43,10 +44,13 @@ pub fn try_execute_grouped_int(
         .map(|n| table.column(n))
         .collect::<Result<_>>()?;
 
-    for i in 0..row_count {
-        if !mask[i] {
-            continue;
-        }
+    let row_iter: Vec<usize> = if mask_is_sparse(&mask) {
+        selected_indices(&mask)
+    } else {
+        (0..row_count).filter(|&i| mask[i]).collect()
+    };
+
+    for i in row_iter {
         let key = pack_key(&col_refs, i);
         let bucket = groups.entry(key).or_insert_with(|| GroupBucket {
             states: parsed
