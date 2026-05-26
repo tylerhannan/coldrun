@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArguments};
 
-use super::{parse_query, ParsedQuery, SelectItemKind};
+use super::{expr_column_name, parse_query, ParsedQuery, SelectItemKind};
 use crate::Result;
 
 /// Column names referenced by a query (for pruning I/O). Returns `None` if all columns are needed (`SELECT *`).
@@ -11,8 +11,29 @@ pub fn referenced_columns_for_sql(sql: &str) -> Result<Option<HashSet<String>>> 
     Ok(referenced_columns(&parsed))
 }
 
+/// Q24: load URL + EventTime first; project remaining columns after top-K sort.
+pub fn q24_narrow_load(parsed: &ParsedQuery) -> bool {
+    if !parsed.select_all || parsed.order_by.len() != 1 || parsed.limit.is_none() {
+        return false;
+    }
+    let (order_expr, _) = &parsed.order_by[0];
+    if expr_column_name(order_expr).as_deref() != Some("EventTime") {
+        return false;
+    }
+    parsed
+        .where_expr
+        .as_ref()
+        .is_some_and(where_is_url_like)
+}
+
 pub fn referenced_columns(parsed: &ParsedQuery) -> Option<HashSet<String>> {
     if parsed.select_all {
+        if q24_narrow_load(parsed) {
+            let mut cols = HashSet::new();
+            cols.insert("URL".to_string());
+            cols.insert("EventTime".to_string());
+            return Some(cols);
+        }
         return None;
     }
     let mut cols = HashSet::new();
@@ -99,6 +120,19 @@ fn collect_expr(expr: &Expr, cols: &mut HashSet<String>) {
         Expr::IsNull(inner) => collect_expr(inner, cols),
         Expr::Value(_) | Expr::TypedString { .. } => {}
         _ => {}
+    }
+}
+
+fn where_is_url_like(expr: &Expr) -> bool {
+    match expr {
+        Expr::Like {
+            expr: inner,
+            pattern: _,
+            negated: false,
+            ..
+        } => expr_column_name(inner).as_deref() == Some("URL"),
+        Expr::Nested(e) => where_is_url_like(e),
+        _ => false,
     }
 }
 

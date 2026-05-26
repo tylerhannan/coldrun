@@ -11,7 +11,7 @@ use super::QueryResult;
 use super::{col_key, projection_label};
 
 pub fn try_execute_scan_fast(
-    table: &Table,
+    table: &mut Table,
     parsed: &ParsedQuery,
     row_count: usize,
 ) -> Result<Option<QueryResult>> {
@@ -93,7 +93,7 @@ fn try_scan_two_order(
 
 /// Q24: `SELECT * … WHERE URL LIKE '%x%' ORDER BY EventTime LIMIT n` — sort row indices only.
 fn try_scan_star_like_order_limit(
-    table: &Table,
+    table: &mut Table,
     parsed: &ParsedQuery,
     row_count: usize,
 ) -> Result<Option<QueryResult>> {
@@ -126,6 +126,12 @@ fn try_scan_star_like_order_limit(
         sort_indices_by_column(time_col, &mut indices, false);
     }
     let slice: Vec<usize> = indices.into_iter().skip(offset).take(limit).collect();
+
+    let missing_names = table.unload_columns();
+    if !missing_names.is_empty() {
+        let refs: Vec<&str> = missing_names.iter().map(String::as_str).collect();
+        table.load_columns(&refs)?;
+    }
 
     let names: Vec<String> = table.column_names().map(|s| s.to_string()).collect();
     let mut rows = Vec::with_capacity(slice.len());

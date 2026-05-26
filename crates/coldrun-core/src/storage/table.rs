@@ -115,6 +115,44 @@ impl Table {
             .ok_or_else(|| crate::Error::msg(format!("column '{name}' not loaded")))
     }
 
+    pub fn is_column_loaded(&self, name: &str) -> bool {
+        self.columns.contains_key(name)
+    }
+
+    /// Load column files not yet in memory (two-phase scan projection).
+    pub fn load_columns(&mut self, names: &[&str]) -> Result<()> {
+        for &name in names {
+            if self.columns.contains_key(name) {
+                continue;
+            }
+            let col_meta = self
+                .meta
+                .columns
+                .iter()
+                .find(|c| c.name == name)
+                .ok_or_else(|| crate::Error::msg(format!("unknown column '{name}'")))?;
+            let col_path = self
+                .path
+                .join("columns")
+                .join(format!("{}.col", col_meta.name));
+            if !col_path.exists() {
+                return Err(crate::Error::msg(format!("column file missing: {name}")));
+            }
+            self.columns
+                .insert(col_meta.name.clone(), ColumnData::read_file(&col_path)?);
+        }
+        Ok(())
+    }
+
+    pub fn unload_columns(&self) -> Vec<String> {
+        self.meta
+            .columns
+            .iter()
+            .filter(|c| !self.columns.contains_key(&c.name))
+            .map(|c| c.name.clone())
+            .collect()
+    }
+
     pub fn column_mut(&mut self, name: &str) -> Result<&mut ColumnData> {
         self.columns
             .get_mut(name)

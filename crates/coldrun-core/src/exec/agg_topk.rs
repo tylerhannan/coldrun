@@ -9,7 +9,6 @@ use ahash::AHashMap;
 use super::agg_heap::top_counts;
 
 /// Incremental group counts with optional prune before materializing all keys.
-/// Scaffold for Parquet / real `hits` where group cardinality ≫ LIMIT.
 pub struct StreamingTopK<K: Hash + Eq + Clone> {
     counts: AHashMap<K, u64>,
     limit: usize,
@@ -63,5 +62,62 @@ impl<K: Hash + Eq + Clone + Ord> StreamingTopK<K> {
     {
         let scored = self.counts.into_iter().map(|(k, c)| (c, row(k, c)));
         top_counts(scored, self.limit, self.offset)
+    }
+}
+
+pub trait TopKCount {
+    fn topk_count(&self) -> u64;
+}
+
+/// Top-K over aggregate state ranked by [`TopKCount::topk_count`].
+pub struct StreamingAggTopK<K: Hash + Eq + Clone, A> {
+    map: AHashMap<K, A>,
+    limit: usize,
+    offset: usize,
+}
+
+impl<K: Hash + Eq + Clone + Ord, A: TopKCount + Default> StreamingAggTopK<K, A> {
+    pub fn new(limit: usize, offset: usize) -> Self {
+        Self {
+            map: AHashMap::new(),
+            limit,
+            offset,
+        }
+    }
+
+    pub fn update(&mut self, key: K, f: impl FnOnce(&mut A)) {
+        let e = self.map.entry(key).or_default();
+        f(e);
+        let need = self.limit.saturating_add(self.offset);
+        if need > 0 && self.map.len() > need.saturating_mul(64) {
+            self.prune();
+        }
+    }
+
+    fn prune(&mut self) {
+        let need = self.limit.saturating_add(self.offset);
+        if need == 0 {
+            return;
+        }
+        let mut entries: Vec<(u64, K, A)> = self
+            .map
+            .drain()
+            .map(|(k, a)| (a.topk_count(), k, a))
+            .collect();
+        if entries.len() <= need {
+            for (_, k, a) in entries {
+                self.map.insert(k, a);
+            }
+            return;
+        }
+        entries.select_nth_unstable_by(need - 1, |a, b| b.0.cmp(&a.0));
+        entries.truncate(need);
+        for (_, k, a) in entries {
+            self.map.insert(k, a);
+        }
+    }
+
+    pub fn into_map(self) -> AHashMap<K, A> {
+        self.map
     }
 }

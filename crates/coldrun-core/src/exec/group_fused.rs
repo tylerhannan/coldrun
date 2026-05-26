@@ -95,6 +95,23 @@ struct PairAgg {
     n_w: u64,
 }
 
+impl super::agg_topk::TopKCount for PairAgg {
+    fn topk_count(&self) -> u64 {
+        self.count
+    }
+}
+
+#[derive(Default)]
+struct CountOnly {
+    count: u64,
+}
+
+impl super::agg_topk::TopKCount for CountOnly {
+    fn topk_count(&self) -> u64 {
+        self.count
+    }
+}
+
 /// Q10: RegionID + SUM + COUNT + AVG + COUNT DISTINCT UserID.
 #[derive(Default)]
 struct RegionBucket {
@@ -220,6 +237,39 @@ fn try_fused_int_pair_aggs(
     let Some(mask) = build_mask(table, parsed, row_count)? else {
         return Ok(empty_result(parsed));
     };
+
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+
+    if limit < usize::MAX && !table.demo_near_unique() {
+        let mut topk = super::agg_topk::StreamingAggTopK::<u128, PairAgg>::new(limit, offset);
+        for_each_selected(&mask, row_count, |i| {
+            let key = super::column_slice::pack_pair(ic1, ic2, i);
+            topk.update(key, |b| {
+                b.count += 1;
+                if let (Some(ss), Some(as_)) = (sum_slice, avg_slice) {
+                    b.sum_b += super::column_slice::int_at(ss, i);
+                    b.sum_w += super::column_slice::int_at(as_, i);
+                    b.n_w += 1;
+                }
+            });
+        });
+        let rows = topk.into_map().into_iter().map(|(key, b)| {
+            let (a, bb) = unpack_pair_keys(c1, c2, key);
+            let avg = b.sum_w as f64 / b.n_w.max(1) as f64;
+            (
+                b.count,
+                vec![
+                    a,
+                    bb,
+                    b.count.to_string(),
+                    b.sum_b.to_string(),
+                    format!("{avg}"),
+                ],
+            )
+        });
+        return finish_count_sorted(parsed, rows);
+    }
 
     const SHARDS: usize = 256;
     let mut shards: [AHashMap<u128, PairAgg>; SHARDS] =
@@ -410,6 +460,28 @@ fn try_fused_int_utf8_count(
     let Some(mask) = build_mask(table, parsed, row_count)? else {
         return Ok(empty_result(parsed));
     };
+
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+
+    if limit < usize::MAX && !table.demo_near_unique() {
+        let mut intern = super::utf8_arena::Utf8Intern::with_capacity(512);
+        let mut topk =
+            super::agg_topk::StreamingAggTopK::<(i64, u32), CountOnly>::new(limit, offset);
+        for_each_selected(&mask, row_count, |i| {
+            if let Ok(ik) = i64_at(ic, i) {
+                let uid = intern.intern(&udata[i]);
+                topk.update((ik, uid), |b| b.count += 1);
+            }
+        });
+        let out = topk.into_map().into_iter().map(|((ik, uid), b)| {
+            (
+                b.count,
+                vec![ik.to_string(), intern.get(uid).to_string(), b.count.to_string()],
+            )
+        });
+        return finish_count_sorted(parsed, out);
+    }
 
     let mut groups: AHashMap<(i64, u64), (String, u64)> = AHashMap::with_capacity(mask.len() / 4 + 1);
     for_each_selected(&mask, row_count, |i| {

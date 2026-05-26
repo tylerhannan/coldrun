@@ -44,6 +44,9 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | **Streaming top-K scaffold** | `agg_topk.rs` wired for utf8 COUNT with LIMIT (non-demo) |
 | **`PodStorage` / Arc numerics** | Shared POD buffers after column read (`storage/pod.rs`) |
 | **Q24 partial sort** | `select_nth_unstable` for ORDER BY EventTime LIMIT scan |
+| **Q24 two-phase I/O** | Narrow load (URL + EventTime); lazy project after top-K sort |
+| **Near-unique O(limit) GROUP BY** | Q11–15, Q31–34 on demo — skip full hash when one row per group |
+| **`StreamingAggTopK`** | Prune int-pair / int+utf8 fused GROUP BY on Parquet paths |
 | **Multi global agg** | One mask pass for `SUM` + `COUNT(*)` + `AVG` (Q3) |
 | **Global COUNT DISTINCT** | Dedicated fast path for int/utf8 columns (Q5–Q6) |
 | **Column-order scan** | `SELECT col ORDER BY col LIMIT` sorts via row indices (Q25–Q26) |
@@ -78,11 +81,12 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | pass 4 | `demo_near_unique` O(limit) paths (Q19/Q35/Q36), Q40 CASE fused, Q19 utf8 intern — [`bench-all-100k-pass4.md`](overnight/bench-all-100k-pass4.md) |
 | pass 5 | Sharded Q31–33, fused Q11/Q22/Q23, near-unique Q17–18, DISTINCT intern — [`bench-all-100k-pass5.md`](overnight/bench-all-100k-pass5.md) |
 | pass 6 | `PodStorage`/`Arc<[T]>`, StreamingTopK utf8 COUNT, Q24 partial sort, Q6 intern — [`bench-all-100k-pass6.md`](overnight/bench-all-100k-pass6.md) |
+| pass 7 | Q24 two-phase I/O, near-unique O(limit) GROUP BY, StreamingAggTopK int-pair — [`bench-all-100k-pass7.md`](overnight/bench-all-100k-pass7.md) |
 
 ## Next (planned)
 
-1. **Two-phase Q24 I/O** — narrow column load for filter/sort, lazy project for LIMIT rows
-2. **StreamingTopK on Parquet GROUP BY** — int-pair and multi-utf8 paths when not demo
+1. **Q24 row projection** — decode only selected row indices from column files (mmap slice)
+2. **Q16 near-unique** — single high-card int GROUP BY + LIMIT on demo
 3. **ClickBench PR prep** — harness polish (scores need cloud VM)
 
 ## Honest scope

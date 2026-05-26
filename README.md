@@ -99,13 +99,13 @@ docs/SMOKE-DEMO.md     # quick local smoke test (scripts/smoke-demo.sh)
 
 ## Next (planned)
 
-Demo @ 100k is **43/43 correct**; **total ~0.37s** for 43 queries (pass 6). Planned (local, no cloud repro):
+Demo @ 100k is **43/43 correct**; **total ~0.20s** for 43 queries (pass 7). Planned (local, no cloud repro):
 
-1. **Two-phase Q24 I/O** — load URL+EventTime for sort, then project LIMIT rows from remaining columns
-2. **StreamingTopK on Parquet GROUP BY** — int-pair and multi-utf8 paths when not demo
+1. **Q24 row projection** — decode only top-K row indices from column files
+2. **Q16 near-unique** — high-card int GROUP BY + LIMIT on demo
 3. **ClickBench PR prep** — harness polish only
 
-Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass6.md`](docs/overnight/bench-all-100k-pass6.md)
+Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass7.md`](docs/overnight/bench-all-100k-pass7.md)
 
 ## Out of scope
 
