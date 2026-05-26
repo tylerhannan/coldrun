@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+DATA_DIR="${COLDRUN_DATA:-$DIR/.clickbench}"
+du -sb "$DATA_DIR" | awk '{print $1}'

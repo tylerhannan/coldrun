@@ -1,0 +1,9 @@
+/target/
+.coldrun/
+.coldrun-demo/
+clickbench/coldrun/.clickbench/
+smoke-all.log
+hits.parquet
+*.parquet
+result.csv
+.DS_Store

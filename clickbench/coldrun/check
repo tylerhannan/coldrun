@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+DATA_DIR="${COLDRUN_DATA:-$DIR/.clickbench}"
+test -f "$DATA_DIR/manifest.json"

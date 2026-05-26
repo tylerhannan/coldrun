@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="${COLDRUN_ROOT:-$(cd "$DIR/../.." && pwd)}"
+COLDRUN="${COLDRUN_BIN:-$ROOT/target/release/coldrun}"
+
+DATA_DIR="${COLDRUN_DATA:-$DIR/.clickbench}"
+PARQUET="${HITS_PARQUET:-hits.parquet}"
+
+rm -rf "$DATA_DIR"
+mkdir -p "$DATA_DIR"
+
+"$COLDRUN" --data-dir "$DATA_DIR" local --load "$PARQUET"

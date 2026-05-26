@@ -1,0 +1,18 @@
+[package]
+name = "coldrun-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arrow.workspace = true
+lz4_flex.workspace = true
+parquet.workspace = true
+chrono.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlparser.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

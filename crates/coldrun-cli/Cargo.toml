@@ -1,0 +1,16 @@
+[package]
+name = "coldrun-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "coldrun"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+coldrun-core = { path = "../coldrun-core" }
+tracing.workspace = true
+tracing-subscriber.workspace = true

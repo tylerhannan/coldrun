@@ -1,0 +1,3 @@
+#!/bin/bash
+# Embedded benchmark mode: no daemon.
+exit 0
