@@ -34,6 +34,17 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | **Global COUNT DISTINCT** | Dedicated fast path for int/utf8 columns (Q5–Q6) |
 | **Column-order scan** | `SELECT col ORDER BY col LIMIT` sorts via row indices (Q25–Q26) |
 | **Group hash reserve** | Pre-size hash tables from filtered row count |
+| **Q27 scan** | Two-key `ORDER BY EventTime, SearchPhrase` |
+| **Q29 fast path** | 90× `SUM(ResolutionWidth + k)` in one column pass |
+| **Sparse masks** | Iterate selected row indices when filter is selective |
+| **mmap columns** | Files &gt; 64 KB decoded via `memmap2` |
+| **Parallel Parquet load** | Per-batch column extract with `rayon` |
+| **bench-all.sh** | Time all 43 queries on demo data |
+| **CI** | GitHub Actions: build + `smoke-all.sh 10000` |
+
+```bash
+./scripts/bench-all.sh 100000    # all 43 queries
+```
 
 ## Changelog
 
@@ -44,6 +55,7 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | round 4 | Multi global agg, global COUNT DISTINCT |
 | round 5 | Scan sort fast path, hash reserve, in-place mask AND/OR |
 | overnight 1–2 | Regression script; 100k/500k baselines in `docs/overnight/` |
+| overnight 4–11 | Q27/Q29 fast paths, sparse masks, mmap, rayon load, bench-all, CI |
 
 ## Next (planned)
 
