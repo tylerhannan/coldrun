@@ -99,12 +99,12 @@ docs/SMOKE-DEMO.md     # quick local smoke test (scripts/smoke-demo.sh)
 
 ## Next (planned)
 
-Demo @ 100k is **43/43 correct**; **total ~0.16s** for 43 queries (pass 10). Next levers:
+Demo @ 100k is **43/43 correct**; **total ~0.16s** for 43 queries (pass 11). Next levers:
 
-1. **Zone-guided EventTime scan** — use v2 bounds for ORDER BY LIMIT
-2. **Q6 / Q23 / Q40** — remaining ~7–11ms queries on demo
+1. **Q23 / Q40** — further dashboard / multi-agg tuning on demo
+2. **Real-data EventTime scan** — zone merge when row order ≠ time order
 
-Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass10.md`](docs/overnight/bench-all-100k-pass10.md)
+Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass11.md`](docs/overnight/bench-all-100k-pass11.md)
 
 ## Out of scope
 

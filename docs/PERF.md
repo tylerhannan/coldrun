@@ -57,6 +57,8 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | **Utf8 offset sidecar** | `.col.idx` per utf8 column for O(1) `read_cells_at` |
 | **Streaming scan top-K** | Q25/Q26 heap over rows — no full filtered index vector |
 | **Parallel Q24 projection** | `project_rows` loads columns with `rayon` |
+| **Zone EventTime top-K** | Monotonic forward scan + v2 zone prune for ORDER BY EventTime LIMIT |
+| **Q6 ahash DISTINCT** | COUNT DISTINCT SearchPhrase without utf8 arena intern |
 | **Group hash reserve** | Pre-size hash tables from filtered row count |
 | **Q27 scan** | Two-key `ORDER BY EventTime, SearchPhrase` |
 | **Q29 fast path** | 90× `SUM(ResolutionWidth + k)` in one column pass |
@@ -92,11 +94,12 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | pass 8 | Metadata-only COUNT(*), near-unique Q16/Q22/Q23, Q25 partial sort, Q21 LIKE count — [`bench-all-100k-pass8.md`](overnight/bench-all-100k-pass8.md) |
 | pass 9 | Row-indexed Q24 `project_rows`, fused AND filter, zone v2 EventTime — [`bench-all-100k-pass9.md`](overnight/bench-all-100k-pass9.md) |
 | pass 10 | Utf8 `.col.idx` sidecar, parallel `project_rows`, streaming top-K Q25–26 — [`bench-all-100k-pass10.md`](overnight/bench-all-100k-pass10.md) |
+| pass 11 | Zone EventTime top-K, Q6 ahash DISTINCT, Q23/Q27 scan filters — [`bench-all-100k-pass11.md`](overnight/bench-all-100k-pass11.md) |
 
 ## Next (planned)
 
-1. **Zone-guided EventTime scan** — ORDER BY LIMIT using v2 zone bounds
-2. **Q6 / Q23 / Q40** — remaining ~7–11ms queries on demo
+1. **Q23 / Q40** — further multi-agg and dashboard tuning on demo
+2. **Non-monotonic EventTime** — zone heap merge for real `hits.parquet` loads
 
 ## Honest scope
 

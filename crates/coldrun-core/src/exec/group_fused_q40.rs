@@ -46,18 +46,18 @@ pub fn try_fused_q40(
 
     let mut src_intern = Utf8Intern::with_capacity(256);
     let mut dst_intern = Utf8Intern::with_capacity(256);
+    let empty_src = src_intern.intern("");
     let mut counts: AHashMap<(i16, i16, i16, u32, u32), u64> = AHashMap::with_capacity(512);
 
     for_each_selected(&mask, row_count, |i| {
         let t = trafic[i];
         let s = se[i];
         let a = adv[i];
-        let src = if s == 0 && a == 0 {
-            referer[i].as_str()
+        let si = if s == 0 && a == 0 {
+            src_intern.intern(referer[i].as_str())
         } else {
-            ""
+            empty_src
         };
-        let si = src_intern.intern(src);
         let di = dst_intern.intern(url[i].as_str());
         *counts.entry((t, s, a, si, di)).or_insert(0) += 1;
     });

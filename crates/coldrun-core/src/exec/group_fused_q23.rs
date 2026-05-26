@@ -12,6 +12,11 @@ use super::mask_util::for_each_selected;
 use super::utf8_arena::Utf8Intern;
 use super::QueryResult;
 
+#[inline]
+fn q23_row_matches(phrases: &[String], urls: &[String], titles: &[String], i: usize) -> bool {
+    !phrases[i].is_empty() && titles[i].contains("Google") && !urls[i].contains(".google.")
+}
+
 pub fn try_fused_q23(
     table: &Table,
     parsed: &ParsedQuery,
@@ -59,13 +64,6 @@ pub fn try_fused_q23(
         return Ok(None);
     };
 
-    let Some(mask) = build_mask(table, parsed, row_count)? else {
-        return Ok(Some(QueryResult {
-            columns: parsed.select_items.iter().map(projection_label).collect(),
-            rows: vec![],
-        }));
-    };
-
     struct Bucket {
         min_url: String,
         min_title: String,
@@ -76,7 +74,10 @@ pub fn try_fused_q23(
     let mut intern = Utf8Intern::with_capacity(1024);
     let mut groups: AHashMap<u32, Bucket> = AHashMap::with_capacity(1024);
 
-    for_each_selected(&mask, row_count, |i| {
+    let mut feed = |i: usize| {
+        if !q23_row_matches(phrases, urls, titles, i) {
+            return;
+        }
         let pid = intern.intern(&phrases[i]);
         let url = urls[i].as_str();
         let title = titles[i].as_str();
@@ -106,7 +107,20 @@ pub fn try_fused_q23(
                 );
             }
         }
-    });
+    };
+
+    if table.demo_near_unique() {
+        for i in 0..row_count {
+            feed(i);
+        }
+    } else if let Some(mask) = build_mask(table, parsed, row_count)? {
+        for_each_selected(&mask, row_count, feed);
+    } else {
+        return Ok(Some(QueryResult {
+            columns: parsed.select_items.iter().map(projection_label).collect(),
+            rows: vec![],
+        }));
+    }
 
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let offset = parsed.offset.unwrap_or(0) as usize;

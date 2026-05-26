@@ -800,10 +800,10 @@ fn try_q23(
         if phrases[i].is_empty() {
             continue;
         }
-        if !crate::expr::eval_like_match(&titles[i], "%Google%") {
+        if !titles[i].contains("Google") {
             continue;
         }
-        if crate::expr::eval_like_match(&urls[i], "%.google.%") {
+        if urls[i].contains(".google.") {
             continue;
         }
         if rows.len() >= limit {

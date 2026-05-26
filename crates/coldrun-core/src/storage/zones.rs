@@ -204,6 +204,16 @@ impl ZoneIndex {
         }
     }
 
+    /// True when zone EventTime bounds are non-decreasing in physical row order (demo / sorted loads).
+    pub fn event_time_monotonic_in_row_order(&self) -> bool {
+        if self.version < ZONE_VERSION_V2 || self.zones.is_empty() {
+            return false;
+        }
+        self.zones
+            .windows(2)
+            .all(|w| w[0].max_event_time <= w[1].min_event_time)
+    }
+
     /// Mark row indices that may match CounterID = `counter` and EventDate in [min_date, max_date].
     pub fn apply_dashboard_prune(
         &self,

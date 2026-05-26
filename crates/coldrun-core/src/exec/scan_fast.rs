@@ -6,6 +6,7 @@ use sqlparser::ast::{BinaryOperator, Expr, Value};
 
 use crate::expr::eval_like_match;
 use crate::sql::{expr_column_name, ParsedQuery, SelectItemKind};
+use crate::storage::zones::{ZoneIndex, ZONE_ROWS, ZONE_VERSION_V2};
 use crate::storage::{ColumnData, Table};
 use crate::Result;
 
@@ -124,6 +125,7 @@ fn try_scan_order_different_col(
                     (sel_col, order_col)
                 {
                     let indices = streaming_topk_i64(
+                        table,
                         row_count,
                         need,
                         *desc,
@@ -160,6 +162,35 @@ fn try_scan_two_order(
 
     let col1 = table.column(&n1)?;
     let col2 = table.column(&n2)?;
+
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(row_count);
+    let need = offset.saturating_add(limit);
+    if need > 0 && need < row_count && n1 == "EventTime" && !*d1 {
+        if let Some(filter_name) = utf8_ne_empty_column(parsed.where_expr.as_ref()) {
+            if filter_name == sel_name {
+                if let (ColumnData::Timestamp(times), ColumnData::Utf8(v)) = (col1, col2) {
+                    if table
+                        .zones()
+                        .is_some_and(|z| z.event_time_monotonic_in_row_order())
+                    {
+                        let mut indices =
+                            forward_scan_until(row_count, need, |i| !v[i].is_empty());
+                        indices.sort_by(|&a, &b| {
+                            let t = times[a].cmp(&times[b]);
+                            if t != std::cmp::Ordering::Equal {
+                                return t;
+                            }
+                            v[a].cmp(&v[b])
+                        });
+                        let out_col = table.column(sel_name)?;
+                        return Ok(Some(build_scan_result(proj, out_col, &indices, parsed)?));
+                    }
+                }
+            }
+        }
+    }
+
     let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
     let mut indices = select_indices_for_where(table, parsed.where_expr.as_ref(), row_count, &mask)?;
     partial_or_full_sort_indices_two(col1, col2, &mut indices, parsed, *d1, *d2);
@@ -550,6 +581,7 @@ fn cmp_at(col: &ColumnData, a: usize, b: usize, desc: bool) -> std::cmp::Orderin
 
 /// Keep the best `need` row indices by i64 key without materializing the full filtered set.
 fn streaming_topk_i64(
+    table: &Table,
     row_count: usize,
     need: usize,
     desc: bool,
@@ -559,22 +591,101 @@ fn streaming_topk_i64(
     if need == 0 {
         return Vec::new();
     }
+    if !desc {
+        if let Some(zones) = table.zones() {
+            if zones.event_time_monotonic_in_row_order() {
+                return forward_scan_until(row_count, need, row_ok);
+            }
+            if zones.version >= ZONE_VERSION_V2 {
+                return streaming_topk_i64_zoned(zones, row_count, need, desc, row_ok, key_at);
+            }
+        }
+    }
+    streaming_topk_i64_full(row_count, need, desc, row_ok, key_at)
+}
+
+fn forward_scan_until(row_count: usize, need: usize, row_ok: impl Fn(usize) -> bool) -> Vec<usize> {
+    let mut out = Vec::with_capacity(need);
+    for i in 0..row_count {
+        if row_ok(i) {
+            out.push(i);
+            if out.len() >= need {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+fn streaming_topk_i64_zoned(
+    zones: &ZoneIndex,
+    row_count: usize,
+    need: usize,
+    desc: bool,
+    row_ok: impl Fn(usize) -> bool,
+    key_at: impl Fn(usize) -> i64,
+) -> Vec<usize> {
+    let mut heap: BinaryHeap<(i64, usize)> = BinaryHeap::new();
+    let mut row = 0usize;
+    for zone in &zones.zones {
+        let zone_end = (row + ZONE_ROWS).min(row_count);
+        if zone_end <= row {
+            break;
+        }
+        if heap.len() >= need {
+            if let Some(&(worst_k, _)) = heap.peek() {
+                if !desc && zone.min_event_time > worst_k {
+                    row = zone_end;
+                    continue;
+                }
+                if desc && zone.max_event_time < worst_k {
+                    row = zone_end;
+                    continue;
+                }
+            }
+        }
+        for i in row..zone_end {
+            if !row_ok(i) {
+                continue;
+            }
+            let k = key_at(i);
+            push_topk_i64(&mut heap, need, desc, k, i);
+        }
+        row = zone_end;
+    }
+    finish_topk_i64_heap(heap, desc)
+}
+
+fn streaming_topk_i64_full(
+    row_count: usize,
+    need: usize,
+    desc: bool,
+    row_ok: impl Fn(usize) -> bool,
+    key_at: impl Fn(usize) -> i64,
+) -> Vec<usize> {
     let mut heap: BinaryHeap<(i64, usize)> = BinaryHeap::new();
     for i in 0..row_count {
         if !row_ok(i) {
             continue;
         }
-        let k = key_at(i);
-        if heap.len() < need {
+        push_topk_i64(&mut heap, need, desc, key_at(i), i);
+    }
+    finish_topk_i64_heap(heap, desc)
+}
+
+fn push_topk_i64(heap: &mut BinaryHeap<(i64, usize)>, need: usize, desc: bool, k: i64, i: usize) {
+    if heap.len() < need {
+        heap.push((k, i));
+    } else if let Some(&(worst_k, _)) = heap.peek() {
+        let replace = if desc { k > worst_k } else { k < worst_k };
+        if replace {
+            heap.pop();
             heap.push((k, i));
-        } else if let Some(&(worst_k, _)) = heap.peek() {
-            let replace = if desc { k > worst_k } else { k < worst_k };
-            if replace {
-                heap.pop();
-                heap.push((k, i));
-            }
         }
     }
+}
+
+fn finish_topk_i64_heap(heap: BinaryHeap<(i64, usize)>, desc: bool) -> Vec<usize> {
     let mut v: Vec<_> = heap.into_iter().collect();
     if desc {
         v.sort_by(|a, b| b.0.cmp(&a.0));

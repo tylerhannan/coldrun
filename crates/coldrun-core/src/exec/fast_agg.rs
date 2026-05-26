@@ -281,14 +281,24 @@ fn try_count_distinct_searchphrase(
     let ColumnData::Utf8(v) = table.column("SearchPhrase")? else {
         return Ok(None);
     };
-    let mut intern = super::utf8_arena::Utf8Intern::with_capacity(4096);
-    let mut ids = ahash::AHashSet::new();
+    use std::hash::{Hash, Hasher};
+    use ahash::AHasher;
+
+    let mut ids = ahash::AHashSet::with_capacity(4096);
+    let mut has_empty = false;
     for s in v.iter().take(row_count) {
-        ids.insert(intern.intern(s));
+        if s.is_empty() {
+            has_empty = true;
+            continue;
+        }
+        let mut h = AHasher::default();
+        s.hash(&mut h);
+        ids.insert(h.finish());
     }
+    let n = ids.len() + usize::from(has_empty);
     Ok(Some(QueryResult {
         columns: vec![projection_label(proj)],
-        rows: vec![vec![ids.len().to_string()]],
+        rows: vec![vec![n.to_string()]],
     }))
 }
 
