@@ -1,4 +1,5 @@
 mod aggregate;
+mod agg_heap;
 mod fast_agg;
 mod fast_q29;
 mod filter;

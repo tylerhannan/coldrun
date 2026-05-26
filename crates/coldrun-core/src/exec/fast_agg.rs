@@ -1,6 +1,6 @@
 use ahash::AHashSet;
 
-use sqlparser::ast::Expr;
+use sqlparser::ast::{BinaryOperator, Expr, Value};
 
 use crate::sql::{expr_column_name, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, Table};
@@ -29,11 +29,31 @@ pub fn try_execute_global(
         return try_execute_global_multi(table, parsed, row_count);
     }
 
-    let mask = build_filter_mask(&table, parsed.where_expr.as_ref(), row_count)?;
-    let selected = count_selected(&mask);
-
     let proj = &parsed.select_items[0];
     let col_name = projection_label(proj);
+
+    // Q1: bare COUNT(*) — metadata row count, no column scan.
+    if parsed.where_expr.is_none() {
+        if matches!(proj.kind, SelectItemKind::CountAll | SelectItemKind::Count(_)) {
+            return Ok(Some(QueryResult {
+                columns: vec![col_name],
+                rows: vec![vec![row_count.to_string()]],
+            }));
+        }
+    }
+
+    // Q2: `COUNT(*) WHERE col <> 0` on int columns — count non-zeros directly.
+    if let Some(n) = try_count_int_nonzero(table, parsed.where_expr.as_ref(), row_count)? {
+        if matches!(proj.kind, SelectItemKind::CountAll | SelectItemKind::Count(_)) {
+            return Ok(Some(QueryResult {
+                columns: vec![col_name],
+                rows: vec![vec![n.to_string()]],
+            }));
+        }
+    }
+
+    let mask = build_filter_mask(&table, parsed.where_expr.as_ref(), row_count)?;
+    let selected = count_selected(&mask);
 
     match &proj.kind {
         SelectItemKind::CountAll | SelectItemKind::Count(_) => {
@@ -221,6 +241,41 @@ fn classify_simple(kind: &SelectItemKind) -> Result<Option<SimpleAgg>> {
         SelectItemKind::CountDistinct(e) => expr_column_name(e).map(SimpleAgg::CountDistinct),
         _ => None,
     })
+}
+
+fn try_count_int_nonzero(
+    table: &Table,
+    where_expr: Option<&Expr>,
+    row_count: usize,
+) -> Result<Option<u64>> {
+    let Some(expr) = where_expr else {
+        return Ok(None);
+    };
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::NotEq,
+        right,
+    } = expr
+    else {
+        return Ok(None);
+    };
+    let Some(name) = expr_column_name(left) else {
+        return Ok(None);
+    };
+    let Expr::Value(Value::Number(n, _)) = &**right else {
+        return Ok(None);
+    };
+    if n != "0" {
+        return Ok(None);
+    }
+    let col = table.column(&name)?;
+    let count = match col {
+        ColumnData::Int16(v) => v.iter().take(row_count).filter(|&&x| x != 0).count(),
+        ColumnData::Int32(v) => v.iter().take(row_count).filter(|&&x| x != 0).count(),
+        ColumnData::Int64(v) => v.iter().take(row_count).filter(|&&x| x != 0).count(),
+        _ => return Ok(None),
+    };
+    Ok(Some(count as u64))
 }
 
 fn count_selected(mask: &[bool]) -> u64 {

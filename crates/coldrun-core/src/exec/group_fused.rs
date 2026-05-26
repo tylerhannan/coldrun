@@ -9,11 +9,11 @@ use crate::sql::{expr_column_name, projection_label, ParsedQuery, SelectItemKind
 use crate::storage::{ColumnData, ColumnType, Table};
 use crate::Result;
 
+use super::agg_heap::top_counts;
 use super::filter::build_filter_mask;
 use super::group::resolve_group_expr;
-use super::group_int::apply_limit_offset;
 use super::having::having_can_match;
-use super::mask_util::{mask_is_sparse, selected_indices};
+use super::mask_util::for_each_selected;
 use super::QueryResult;
 
 pub fn try_execute_group_fused(
@@ -24,7 +24,19 @@ pub fn try_execute_group_fused(
     if let Some(r) = try_fused_int4_count(table, parsed, row_count)? {
         return Ok(Some(r));
     }
+    if let Some(r) = try_fused_q19(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = try_fused_int64_count(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = try_fused_int16_utf8_distinct(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
     if let Some(r) = try_fused_utf8_pair_distinct(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = try_fused_region_aggs(table, parsed, row_count)? {
         return Ok(Some(r));
     }
     if let Some(r) = try_fused_int_pair_aggs(table, parsed, row_count)? {
@@ -34,9 +46,6 @@ pub fn try_execute_group_fused(
         return Ok(Some(r));
     }
     if let Some(r) = try_fused_int_utf8_count(table, parsed, row_count)? {
-        return Ok(Some(r));
-    }
-    if let Some(r) = try_fused_q19(table, parsed, row_count)? {
         return Ok(Some(r));
     }
     if let Some(r) = try_fused_utf8_count_distinct_i64(table, parsed, row_count)? {
@@ -51,24 +60,19 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
-fn filtered_rows(
+fn build_mask(
     table: &Table,
     parsed: &ParsedQuery,
     row_count: usize,
-) -> Result<Option<Vec<usize>>> {
+) -> Result<Option<Vec<bool>>> {
     let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
     let selected = mask.iter().filter(|&&b| b).count() as u64;
     if let Some(having) = &parsed.having {
         if !having_can_match(having, selected.max(1)) {
-            return Ok(Some(vec![]));
+            return Ok(None);
         }
     }
-    let rows = if mask_is_sparse(&mask) {
-        selected_indices(&mask)
-    } else {
-        (0..row_count).filter(|&i| mask[i]).collect()
-    };
-    Ok(Some(rows))
+    Ok(Some(mask))
 }
 
 #[derive(Default)]
@@ -77,6 +81,94 @@ struct PairAgg {
     sum_b: i64,
     sum_w: i64,
     n_w: u64,
+}
+
+/// Q10: RegionID + SUM + COUNT + AVG + COUNT DISTINCT UserID.
+#[derive(Default)]
+struct RegionBucket {
+    count: u64,
+    sum_adv: i64,
+    sum_w: i64,
+    n_w: u64,
+    users: AHashMap<i64, ()>,
+}
+
+fn try_fused_region_aggs(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.group_by.len() != 1 {
+        return Ok(None);
+    }
+    let resolved = resolve_group_expr(&parsed.group_by[0], &parsed.select_items);
+    let Expr::Identifier(id) = &resolved else {
+        return Ok(None);
+    };
+    if id.value != "RegionID" || parsed.select_items.len() < 4 {
+        return Ok(None);
+    }
+    let mut has_sum = false;
+    let mut has_avg = false;
+    let mut has_distinct = false;
+    for p in &parsed.select_items {
+        match &p.kind {
+            SelectItemKind::Sum(e) if expr_column_name(e).as_deref() == Some("AdvEngineID") => {
+                has_sum = true;
+            }
+            SelectItemKind::Avg(e) if expr_column_name(e).as_deref() == Some("ResolutionWidth") => {
+                has_avg = true;
+            }
+            SelectItemKind::CountDistinct(e) if expr_column_name(e).as_deref() == Some("UserID") => {
+                has_distinct = true;
+            }
+            _ => {}
+        }
+    }
+    if !has_sum || !has_avg || !has_distinct {
+        return Ok(None);
+    }
+    let ColumnData::Int32(regions) = table.column("RegionID")? else {
+        return Ok(None);
+    };
+    let ColumnData::Int16(adv) = table.column("AdvEngineID")? else {
+        return Ok(None);
+    };
+    let ColumnData::Int16(width) = table.column("ResolutionWidth")? else {
+        return Ok(None);
+    };
+    let ColumnData::Int64(users) = table.column("UserID")? else {
+        return Ok(None);
+    };
+
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
+    };
+
+    let mut groups: AHashMap<i32, RegionBucket> = AHashMap::with_capacity(512);
+    for_each_selected(&mask, row_count, |i| {
+        let b = groups.entry(regions[i]).or_default();
+        b.count += 1;
+        b.sum_adv += i64::from(adv[i]);
+        b.sum_w += i64::from(width[i]);
+        b.n_w += 1;
+        b.users.insert(users[i], ());
+    });
+
+    let out = groups.into_iter().map(|(rid, b)| {
+        let avg = b.sum_w as f64 / b.n_w.max(1) as f64;
+        (
+            b.count,
+            vec![
+                rid.to_string(),
+                b.sum_adv.to_string(),
+                b.count.to_string(),
+                format!("{avg}"),
+                b.users.len().to_string(),
+            ],
+        )
+    });
+    finish_count_sorted(parsed, out)
 }
 
 /// Q31–33: two int keys + COUNT + SUM(col) + AVG(col).
@@ -109,25 +201,26 @@ fn try_fused_int_pair_aggs(
     let sum_c = table.column(&sum_col)?;
     let avg_c = table.column(&avg_col)?;
 
-    let Some(rows) = filtered_rows(table, parsed, row_count)? else {
-        return Ok(None);
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
     };
 
-    let mut groups: AHashMap<u128, PairAgg> = AHashMap::with_capacity(rows.len() / 4 + 1);
-    for i in rows {
+    let mut groups: AHashMap<u128, PairAgg> = AHashMap::with_capacity(mask.len() / 4 + 1);
+    for_each_selected(&mask, row_count, |i| {
         let key = pack_pair_keys(c1, c2, i);
         let b = groups.entry(key).or_default();
         b.count += 1;
-        b.sum_b += i64_at(sum_c, i)?;
-        b.sum_w += i64_at(avg_c, i)?;
-        b.n_w += 1;
-    }
+        if let (Ok(sb), Ok(sw)) = (i64_at(sum_c, i), i64_at(avg_c, i)) {
+            b.sum_b += sb;
+            b.sum_w += sw;
+            b.n_w += 1;
+        }
+    });
 
-    let mut out: Vec<(u64, Vec<String>)> = Vec::with_capacity(groups.len());
-    for (key, b) in groups {
+    let rows = groups.into_iter().map(|(key, b)| {
         let (a, bb) = unpack_pair_keys(c1, c2, key);
         let avg = b.sum_w as f64 / b.n_w.max(1) as f64;
-        out.push((
+        (
             b.count,
             vec![
                 a,
@@ -136,9 +229,9 @@ fn try_fused_int_pair_aggs(
                 b.sum_b.to_string(),
                 format!("{avg}"),
             ],
-        ));
-    }
-    finish_count_sorted(parsed, out)
+        )
+    });
+    finish_count_sorted(parsed, rows)
 }
 
 fn only_pair_aggs(parsed: &ParsedQuery) -> bool {
@@ -220,27 +313,22 @@ fn try_fused_utf8_count(
         return Ok(None);
     };
 
-    let Some(rows) = filtered_rows(table, parsed, row_count)? else {
-        return Ok(None);
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
     };
 
-    let mut groups: AHashMap<u64, (String, u64)> = AHashMap::with_capacity(rows.len() / 4 + 1);
-    for i in rows {
+    let mut counts: AHashMap<u64, u64> = AHashMap::with_capacity(mask.len() / 4 + 1);
+    let mut keys: AHashMap<u64, String> = AHashMap::new();
+    for_each_selected(&mask, row_count, |i| {
         let s = &data[i];
         let h = hash_str(s);
-        let entry = groups.entry(h).or_insert_with(|| (s.to_string(), 0));
-        if entry.0.as_str() == s {
-            entry.1 += 1;
-        } else {
-            let e2 = groups.entry(hash_str(s)).or_insert_with(|| (s.to_string(), 0));
-            e2.1 += 1;
-        }
-    }
+        *counts.entry(h).or_insert(0) += 1;
+        keys.entry(h).or_insert_with(|| s.to_string());
+    });
 
-    let out: Vec<(u64, Vec<String>)> = groups
-        .into_values()
-        .map(|(k, c)| (c, vec![k, c.to_string()]))
-        .collect();
+    let out = counts.into_iter().filter_map(|(h, c)| {
+        keys.get(&h).map(|k| (c, vec![k.clone(), c.to_string()]))
+    });
     finish_count_sorted(parsed, out)
 }
 
@@ -292,30 +380,25 @@ fn try_fused_int_utf8_count(
         return Ok(None);
     };
 
-    let Some(rows) = filtered_rows(table, parsed, row_count)? else {
-        return Ok(None);
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
     };
 
-    let mut groups: AHashMap<(i64, u64), (String, u64)> = AHashMap::with_capacity(rows.len() / 4 + 1);
-    for i in rows {
-        let ik = i64_at(ic, i)?;
-        let s = &udata[i];
-        let key = (ik, hash_str(s));
-        let entry = groups.entry(key).or_insert_with(|| (s.to_string(), 0));
-        if entry.0.as_str() == s {
-            entry.1 += 1;
-        } else {
-            let e2 = groups
-                .entry((ik, hash_str(s)))
-                .or_insert_with(|| (s.to_string(), 0));
-            e2.1 += 1;
+    let mut groups: AHashMap<(i64, u64), (String, u64)> = AHashMap::with_capacity(mask.len() / 4 + 1);
+    for_each_selected(&mask, row_count, |i| {
+        if let Ok(ik) = i64_at(ic, i) {
+            let s = &udata[i];
+            let key = (ik, hash_str(s));
+            let e = groups.entry(key).or_insert_with(|| (s.to_string(), 0));
+            if e.0.as_str() == s {
+                e.1 += 1;
+            }
         }
-    }
+    });
 
-    let out: Vec<(u64, Vec<String>)> = groups
-        .iter()
-        .map(|((ik, _), (s, c))| (*c, vec![ik.to_string(), s.clone(), c.to_string()]))
-        .collect();
+    let out = groups
+        .into_iter()
+        .map(|((ik, _), (s, c))| (c, vec![ik.to_string(), s, c.to_string()]));
     finish_count_sorted(parsed, out)
 }
 
@@ -372,8 +455,8 @@ fn try_fused_q19(
         return Ok(None);
     }
 
-    let Some(rows) = filtered_rows(table, parsed, row_count)? else {
-        return Ok(None);
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
     };
 
     #[derive(Clone)]
@@ -385,59 +468,34 @@ fn try_fused_q19(
     }
 
     let mut groups: AHashMap<(i64, i64, u64), Q19Bucket> =
-        AHashMap::with_capacity(rows.len() / 4 + 1);
-    for i in rows {
+        AHashMap::with_capacity(mask.len() / 4 + 1);
+    for_each_selected(&mask, row_count, |i| {
         let u = users[i];
-        let micros = times[i];
-        let minute = ((micros / 1_000_000) / 60) % 60;
+        let minute = ((times[i] / 1_000_000) / 60) % 60;
         let s = &phrases[i];
         let key = (u, minute, hash_str(s));
-        match groups.get_mut(&key) {
-            Some(b) if b.phrase.as_str() == s => b.count += 1,
-            None => {
-                groups.insert(
-                    key,
-                    Q19Bucket {
-                        user: u,
-                        minute,
-                        phrase: s.to_string(),
-                        count: 1,
-                    },
-                );
-            }
-            _ => {
-                let alt = (u, minute, hash_str(s));
-                groups
-                    .entry(alt)
-                    .and_modify(|b| {
-                        if b.phrase.as_str() == s {
-                            b.count += 1;
-                        }
-                    })
-                    .or_insert(Q19Bucket {
-                        user: u,
-                        minute,
-                        phrase: s.to_string(),
-                        count: 1,
-                    });
-            }
+        let b = groups.entry(key).or_insert_with(|| Q19Bucket {
+            user: u,
+            minute,
+            phrase: s.to_string(),
+            count: 0,
+        });
+        if b.phrase.as_str() == s {
+            b.count += 1;
         }
-    }
+    });
 
-    let out: Vec<(u64, Vec<String>)> = groups
-        .values()
-        .map(|b| {
-            (
-                b.count,
-                vec![
-                    b.user.to_string(),
-                    b.minute.to_string(),
-                    b.phrase.clone(),
-                    b.count.to_string(),
-                ],
-            )
-        })
-        .collect();
+    let out = groups.into_values().map(|b| {
+        (
+            b.count,
+            vec![
+                b.user.to_string(),
+                b.minute.to_string(),
+                b.phrase,
+                b.count.to_string(),
+            ],
+        )
+    });
     finish_count_sorted(parsed, out)
 }
 
@@ -474,51 +532,32 @@ fn try_fused_utf8_count_distinct_i64(
         return Ok(None);
     };
 
-    let Some(rows) = filtered_rows(table, parsed, row_count)? else {
-        return Ok(None);
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
     };
 
     let mut groups: AHashMap<u64, (String, AHashMap<i64, ()>)> =
-        AHashMap::with_capacity(rows.len() / 8 + 1);
+        AHashMap::with_capacity(mask.len() / 8 + 1);
 
-    for i in rows {
+    for_each_selected(&mask, row_count, |i| {
         let s = &keys[i];
         let h = hash_str(s);
         let v = vals[i];
-        match groups.get_mut(&h) {
-            Some((ks, set)) if ks == s => {
-                set.insert(v, ());
-            }
-            None => {
-                let mut set = AHashMap::new();
-                set.insert(v, ());
-                groups.insert(h, (s.to_string(), set));
-            }
-            _ => {
-                let e = groups.entry(hash_str(s)).or_insert_with(|| {
-                    let mut set = AHashMap::new();
-                    set.insert(v, ());
-                    (s.to_string(), set)
-                });
-                if e.0.as_str() == s {
-                    e.1.insert(v, ());
-                }
-            }
+        let e = groups.entry(h).or_insert_with(|| {
+            let mut set = AHashMap::new();
+            set.insert(v, ());
+            (s.to_string(), set)
+        });
+        if e.0.as_str() == s {
+            e.1.insert(v, ());
         }
-    }
+    });
 
-    let mut out: Vec<(u64, Vec<String>)> = groups
-        .into_values()
-        .map(|(k, set)| {
-            let u = set.len() as u64;
-            (u, vec![k, u.to_string()])
-        })
-        .collect();
-    out.sort_by(|a, b| b.0.cmp(&a.0));
-    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-    let mut rows: Vec<Vec<String>> = out.into_iter().map(|(_, r)| r).collect();
-    apply_limit_offset(parsed, &mut rows);
-    Ok(Some(QueryResult { columns, rows }))
+    let out = groups.into_values().map(|(k, set)| {
+        let u = set.len() as u64;
+        (u, vec![k, u.to_string()])
+    });
+    finish_count_sorted(parsed, out)
 }
 
 fn q19_group_keys(_table: &Table, parsed: &ParsedQuery) -> bool {
@@ -574,8 +613,8 @@ fn try_fused_int4_count(
         exprs.push(r);
     }
 
-    let Some(rows) = filtered_rows(table, parsed, row_count)? else {
-        return Ok(None);
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
     };
 
     struct Int4Bucket {
@@ -583,26 +622,25 @@ fn try_fused_int4_count(
         count: u64,
     }
 
-    let mut groups: AHashMap<u128, Int4Bucket> = AHashMap::with_capacity(rows.len() / 4 + 1);
-    for i in rows {
-        let key = pack4(table, &exprs, i)?;
-        match groups.get_mut(&key) {
-            Some(b) => b.count += 1,
-            None => {
-                let k = [
-                    eval_int_key(table, &exprs[0], i)? as i32,
-                    eval_int_key(table, &exprs[1], i)? as i32,
-                    eval_int_key(table, &exprs[2], i)? as i32,
-                    eval_int_key(table, &exprs[3], i)? as i32,
-                ];
-                groups.insert(key, Int4Bucket { k, count: 1 });
-            }
+    let mut groups: AHashMap<u128, Int4Bucket> = AHashMap::with_capacity(mask.len() / 4 + 1);
+    for_each_selected(&mask, row_count, |i| {
+        if let (Ok(key), Ok(a), Ok(b0), Ok(c), Ok(d)) = (
+            pack4(table, &exprs, i),
+            eval_int_key(table, &exprs[0], i),
+            eval_int_key(table, &exprs[1], i),
+            eval_int_key(table, &exprs[2], i),
+            eval_int_key(table, &exprs[3], i),
+        ) {
+            let b = groups.entry(key).or_insert(Int4Bucket {
+                k: [a as i32, b0 as i32, c as i32, d as i32],
+                count: 0,
+            });
+            b.count += 1;
         }
-    }
+    });
 
-    let mut out: Vec<(u64, Vec<String>)> = Vec::with_capacity(groups.len());
-    for b in groups.values() {
-        out.push((
+    let out = groups.into_values().map(|b| {
+        (
             b.count,
             vec![
                 b.k[0].to_string(),
@@ -611,8 +649,8 @@ fn try_fused_int4_count(
                 b.k[3].to_string(),
                 b.count.to_string(),
             ],
-        ));
-    }
+        )
+    });
     finish_count_sorted(parsed, out)
 }
 
@@ -661,7 +699,134 @@ fn eval_int_key(table: &Table, expr: &Expr, row: usize) -> Result<i64> {
     }
 }
 
-/// Q12: two utf8 keys + COUNT(DISTINCT UserID).
+/// Q16: single Int64 key + COUNT(*) (e.g. UserID).
+fn try_fused_int64_count(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.group_by.len() != 1 {
+        return Ok(None);
+    }
+    let resolved = resolve_group_expr(&parsed.group_by[0], &parsed.select_items);
+    let Expr::Identifier(id) = &resolved else {
+        return Ok(None);
+    };
+    if table.column_type(&id.value) != Some(ColumnType::Int64) {
+        return Ok(None);
+    }
+    if !parsed.select_items.iter().all(|p| {
+        matches!(
+            p.kind,
+            SelectItemKind::CountAll | SelectItemKind::Count(_) | SelectItemKind::Column(_)
+        )
+    }) {
+        return Ok(None);
+    }
+    let ColumnData::Int64(data) = table.column(&id.value)? else {
+        return Ok(None);
+    };
+
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
+    };
+
+    let mut groups: AHashMap<i64, u64> = AHashMap::with_capacity(mask.len() / 4 + 1);
+    for_each_selected(&mask, row_count, |i| {
+        *groups.entry(data[i]).or_insert(0) += 1;
+    });
+
+    let out = groups
+        .into_iter()
+        .map(|(k, c)| (c, vec![k.to_string(), c.to_string()]));
+    finish_count_sorted(parsed, out)
+}
+
+/// Q12: int16 + utf8 keys + COUNT(DISTINCT UserID).
+fn try_fused_int16_utf8_distinct(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.group_by.len() != 2 {
+        return Ok(None);
+    }
+    let (int_name, utf8_name) = match split_int16_utf8_keys(table, parsed)? {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let mut distinct_col = None;
+    for p in &parsed.select_items {
+        if let SelectItemKind::CountDistinct(e) = &p.kind {
+            distinct_col = expr_column_name(e);
+        }
+    }
+    let Some(distinct_col) = distinct_col else {
+        return Ok(None);
+    };
+    if table.column_type(&distinct_col) != Some(ColumnType::Int64) {
+        return Ok(None);
+    }
+
+    let ColumnData::Int16(i16col) = table.column(&int_name)? else {
+        return Ok(None);
+    };
+    let ColumnData::Utf8(utf8col) = table.column(&utf8_name)? else {
+        return Ok(None);
+    };
+    let ColumnData::Int64(users) = table.column(&distinct_col)? else {
+        return Ok(None);
+    };
+
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
+    };
+
+    let mut groups: AHashMap<u128, (i16, String, AHashMap<i64, ()>)> =
+        AHashMap::with_capacity(mask.len() / 8 + 1);
+
+    for_each_selected(&mask, row_count, |i| {
+        let phone = i16col[i];
+        let model = &utf8col[i];
+        let key = ((phone as u128) << 64) | (hash_str(model) as u128);
+        let e = groups.entry(key).or_insert_with(|| {
+            let mut set = AHashMap::new();
+            set.insert(users[i], ());
+            (phone, model.to_string(), set)
+        });
+        if e.1.as_str() == model {
+            e.2.insert(users[i], ());
+        }
+    });
+
+    let out = groups.into_values().map(|(a, b, set)| {
+        let u = set.len() as u64;
+        (u, vec![a.to_string(), b, u.to_string()])
+    });
+    finish_count_sorted(parsed, out)
+}
+
+fn split_int16_utf8_keys(table: &Table, parsed: &ParsedQuery) -> Result<Option<(String, String)>> {
+    let mut int16_k = None;
+    let mut utf8_k = None;
+    for expr in &parsed.group_by {
+        let resolved = resolve_group_expr(expr, &parsed.select_items);
+        let Expr::Identifier(id) = &resolved else {
+            return Ok(None);
+        };
+        match table.column_type(&id.value) {
+            Some(ColumnType::Int16) => int16_k = Some(id.value.clone()),
+            Some(ColumnType::Utf8) => utf8_k = Some(id.value.clone()),
+            _ => return Ok(None),
+        }
+    }
+    Ok(match (int16_k, utf8_k) {
+        (Some(a), Some(b)) => Some((a, b)),
+        _ => None,
+    })
+}
+
+/// Q12 (utf8+utf8 variant): two utf8 keys + COUNT(DISTINCT UserID).
 fn try_fused_utf8_pair_distinct(
     table: &Table,
     parsed: &ParsedQuery,
@@ -704,39 +869,32 @@ fn try_fused_utf8_pair_distinct(
         return Ok(None);
     };
 
-    let Some(rows) = filtered_rows(table, parsed, row_count)? else {
-        return Ok(None);
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
     };
 
-    let mut groups: AHashMap<(u64, u64), (String, String, AHashMap<i64, ()>)> =
-        AHashMap::with_capacity(rows.len() / 8 + 1);
+    let mut groups: AHashMap<u128, (String, String, AHashMap<i64, ()>)> =
+        AHashMap::with_capacity(mask.len() / 8 + 1);
 
-    for i in rows {
+    for_each_selected(&mask, row_count, |i| {
         let s0 = &c0[i];
         let s1 = &c1[i];
-        let key = (hash_str(s0), hash_str(s1));
-        let entry = groups.entry(key).or_insert_with(|| {
+        let key = ((hash_str(s0) as u128) << 64) | (hash_str(s1) as u128);
+        let e = groups.entry(key).or_insert_with(|| {
             let mut set = AHashMap::new();
             set.insert(users[i], ());
             (s0.to_string(), s1.to_string(), set)
         });
-        if entry.0.as_str() == s0 && entry.1.as_str() == s1 {
-            entry.2.insert(users[i], ());
+        if e.0.as_str() == s0 && e.1.as_str() == s1 {
+            e.2.insert(users[i], ());
         }
-    }
+    });
 
-    let mut out: Vec<(u64, Vec<String>)> = groups
-        .into_values()
-        .map(|(a, b, set)| {
-            let u = set.len() as u64;
-            (u, vec![a, b, u.to_string()])
-        })
-        .collect();
-    out.sort_by(|a, b| b.0.cmp(&a.0));
-    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-    let mut rows: Vec<Vec<String>> = out.into_iter().map(|(_, r)| r).collect();
-    apply_limit_offset(parsed, &mut rows);
-    Ok(Some(QueryResult { columns, rows }))
+    let out = groups.into_values().map(|(a, b, set)| {
+        let u = set.len() as u64;
+        (u, vec![a, b, u.to_string()])
+    });
+    finish_count_sorted(parsed, out)
 }
 
 fn group_id_name(expr: &Expr, parsed: &ParsedQuery) -> Result<String> {
@@ -747,25 +905,20 @@ fn group_id_name(expr: &Expr, parsed: &ParsedQuery) -> Result<String> {
     }
 }
 
+fn empty_result(parsed: &ParsedQuery) -> Option<QueryResult> {
+    Some(QueryResult {
+        columns: parsed.select_items.iter().map(projection_label).collect(),
+        rows: vec![],
+    })
+}
+
 fn finish_count_sorted(
     parsed: &ParsedQuery,
-    mut scored: Vec<(u64, Vec<String>)>,
+    scored: impl Iterator<Item = (u64, Vec<String>)>,
 ) -> Result<Option<QueryResult>> {
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-    let limit = parsed.limit.map(|l| l as usize).unwrap_or(scored.len());
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let offset = parsed.offset.unwrap_or(0) as usize;
-    let need = limit + offset;
-
-    if scored.len() > need.saturating_mul(4) && need > 0 {
-        let nth = need.min(scored.len()).saturating_sub(1);
-        scored.select_nth_unstable_by(nth, |a, b| b.0.cmp(&a.0));
-        scored.truncate(need);
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-    } else {
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-    }
-
-    let mut rows: Vec<Vec<String>> = scored.into_iter().map(|(_, r)| r).collect();
-    apply_limit_offset(parsed, &mut rows);
+    let rows = top_counts(scored, limit, offset);
     Ok(Some(QueryResult { columns, rows }))
 }
