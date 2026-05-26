@@ -10,6 +10,7 @@ use crate::Result;
 use super::aggregate::AggState;
 use super::filter::build_filter_mask;
 use super::group_int::{apply_limit_offset, try_execute_grouped_int};
+use super::topk::truncate_to_top_k;
 use super::QueryResult;
 
 struct GroupBucket {
@@ -96,6 +97,7 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
         rows.push(row);
     }
 
+    truncate_to_top_k(parsed, &column_names, &mut rows);
     sort_rows(&parsed, &column_names, &mut rows)?;
     apply_limit_offset(parsed, &mut rows);
 

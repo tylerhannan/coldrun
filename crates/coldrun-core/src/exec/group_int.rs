@@ -13,6 +13,7 @@ use super::filter::build_filter_mask;
 use super::group::{
     eval_proj_at_row, is_aggregate, is_group_key_proj, resolve_group_expr, sort_rows,
 };
+use super::topk::truncate_to_top_k;
 use super::QueryResult;
 
 const MAX_PACKED_KEYS: usize = 2;
@@ -178,6 +179,7 @@ fn finish_groups(
         rows.push(row);
     }
 
+    truncate_to_top_k(parsed, &column_names, &mut rows);
     sort_rows(parsed, &column_names, &mut rows)?;
     apply_limit_offset(parsed, &mut rows);
 

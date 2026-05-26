@@ -69,7 +69,7 @@ pub fn try_execute_global(
 }
 
 fn count_selected(mask: &[bool]) -> u64 {
-    mask.iter().filter(|&&b| b).count() as u64
+    mask.iter().map(|&b| u64::from(b)).sum()
 }
 
 fn sum_column_masked(table: &Table, name: &str, mask: &[bool]) -> Result<i128> {

@@ -4,7 +4,7 @@ use sqlparser::ast::Expr;
 
 use crate::expr::{eval_i64, eval_string};
 use crate::sql::{expr_column_name, SelectItemKind};
-use crate::storage::Table;
+use crate::storage::{ColumnData, Table};
 use crate::Result;
 
 /// Per-group or global aggregate accumulator.
@@ -15,6 +15,7 @@ pub struct AggState {
     pub avg_sum: Option<i128>,
     pub avg_count: u64,
     pub count_distinct: Option<HashSet<String>>,
+    pub count_distinct_i64: Option<HashSet<i64>>,
     pub min_i64: Option<i64>,
     pub max_i64: Option<i64>,
     pub min_str: Option<String>,
@@ -28,15 +29,31 @@ impl AggState {
                 self.count_all += 1;
             }
             SelectItemKind::Sum(expr) => {
-                let v = eval_i64(table, expr, row)? as i128;
+                let v = if let Some(v) = eval_i64_column(table, expr, row) {
+                    v as i128
+                } else {
+                    eval_i64(table, expr, row)? as i128
+                };
                 *self.sum.get_or_insert(0) += v;
             }
             SelectItemKind::Avg(expr) => {
-                let v = eval_i64(table, expr, row)? as i128;
+                let v = if let Some(v) = eval_i64_column(table, expr, row) {
+                    v as i128
+                } else {
+                    eval_i64(table, expr, row)? as i128
+                };
                 *self.avg_sum.get_or_insert(0) += v;
                 self.avg_count += 1;
             }
             SelectItemKind::CountDistinct(expr) => {
+                if let Some(name) = expr_column_name(expr) {
+                    if let Ok(col) = table.column(&name) {
+                        if let Some(v) = i64_at_column(col, row) {
+                            self.count_distinct_i64.get_or_insert_default().insert(v);
+                            return Ok(());
+                        }
+                    }
+                }
                 let key = if let Some(name) = expr_column_name(expr) {
                     col_key_from_column(table.column(&name)?, row)?
                 } else {
@@ -118,7 +135,12 @@ impl AggState {
                 Ok(("avg".into(), format!("{avg}")))
             }
             SelectItemKind::CountDistinct(_) => {
-                let n = self.count_distinct.as_ref().map(|s| s.len()).unwrap_or(0);
+                let n = self
+                    .count_distinct_i64
+                    .as_ref()
+                    .map(|s| s.len())
+                    .or_else(|| self.count_distinct.as_ref().map(|s| s.len()))
+                    .unwrap_or(0);
                 Ok(("count(distinct)".into(), n.to_string()))
             }
             SelectItemKind::Min(_) => {
@@ -156,6 +178,23 @@ impl AggState {
         }
         Ok(true)
     }
+}
+
+fn eval_i64_column(table: &Table, expr: &Expr, row: usize) -> Option<i64> {
+    let name = expr_column_name(expr)?;
+    let col = table.column(&name).ok()?;
+    i64_at_column(col, row)
+}
+
+fn i64_at_column(col: &ColumnData, row: usize) -> Option<i64> {
+    Some(match col {
+        ColumnData::Int64(v) => v.get(row).copied()?,
+        ColumnData::Int32(v) => i64::from(*v.get(row)?),
+        ColumnData::Int16(v) => i64::from(*v.get(row)?),
+        ColumnData::Date(v) => i64::from(*v.get(row)?),
+        ColumnData::Timestamp(v) => *v.get(row)?,
+        ColumnData::Utf8(_) => return None,
+    })
 }
 
 fn col_key_from_column(col: &crate::storage::ColumnData, i: usize) -> Result<String> {
