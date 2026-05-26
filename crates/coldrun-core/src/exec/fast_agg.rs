@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use sqlparser::ast::Expr;
 
 use crate::sql::{expr_column_name, ParsedQuery, SelectItemKind};
@@ -16,12 +18,14 @@ pub fn try_execute_global(
     if !parsed.group_by.is_empty() {
         return Ok(None);
     }
+
+    if parsed.select_items.len() > 1 {
+        return try_execute_global_multi(table, parsed, row_count);
+    }
+
     let mask = build_filter_mask(&table, parsed.where_expr.as_ref(), row_count)?;
     let selected = count_selected(&mask);
 
-    if parsed.select_items.len() != 1 {
-        return Ok(None);
-    }
     let proj = &parsed.select_items[0];
     let col_name = projection_label(proj);
 
@@ -55,8 +59,18 @@ pub fn try_execute_global(
                 }
             }
         }
+        SelectItemKind::CountDistinct(expr) => {
+            if let Some(n) = count_distinct_masked(table, expr, &mask) {
+                return Ok(Some(QueryResult {
+                    columns: vec![col_name],
+                    rows: vec![vec![n.to_string()]],
+                }));
+            }
+        }
         SelectItemKind::Min(expr) | SelectItemKind::Max(expr) => {
-            if let Some(v) = minmax_column_masked(table, expr, &mask, matches!(proj.kind, SelectItemKind::Max(_))) {
+            if let Some(v) =
+                minmax_column_masked(table, expr, &mask, matches!(proj.kind, SelectItemKind::Max(_)))
+            {
                 return Ok(Some(QueryResult {
                     columns: vec![col_name],
                     rows: vec![vec![v]],
@@ -68,8 +82,115 @@ pub fn try_execute_global(
     Ok(None)
 }
 
+/// One mask pass for Q3-style `SELECT SUM(..), COUNT(*), AVG(..)` on int columns.
+fn try_execute_global_multi(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+) -> Result<Option<QueryResult>> {
+    let mut plans = Vec::with_capacity(parsed.select_items.len());
+    for proj in &parsed.select_items {
+        plans.push(match classify_simple(&proj.kind)? {
+            Some(p) => p,
+            None => return Ok(None),
+        });
+    }
+
+    let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
+    let selected = count_selected(&mask);
+
+    let mut columns = Vec::with_capacity(parsed.select_items.len());
+    let mut values = Vec::with_capacity(parsed.select_items.len());
+
+    for (proj, plan) in parsed.select_items.iter().zip(plans.iter()) {
+        columns.push(projection_label(proj));
+        values.push(match plan {
+            SimpleAgg::CountAll => selected.to_string(),
+            SimpleAgg::Sum(name) => sum_column_masked(table, name, &mask)?.to_string(),
+            SimpleAgg::Avg(name) => {
+                let (sum, n) = sum_column_masked_with_count(table, name, &mask)?;
+                let avg = sum as f64 / n.max(1) as f64;
+                format!("{avg}")
+            }
+            SimpleAgg::CountDistinct(name) => count_distinct_col_masked(table, name, &mask)
+                .ok_or_else(|| crate::Error::msg("count distinct"))?
+                .to_string(),
+        });
+    }
+
+    Ok(Some(QueryResult {
+        columns,
+        rows: vec![values],
+    }))
+}
+
+enum SimpleAgg {
+    CountAll,
+    Sum(String),
+    Avg(String),
+    CountDistinct(String),
+}
+
+fn classify_simple(kind: &SelectItemKind) -> Result<Option<SimpleAgg>> {
+    Ok(match kind {
+        SelectItemKind::CountAll | SelectItemKind::Count(_) => Some(SimpleAgg::CountAll),
+        SelectItemKind::Sum(e) => expr_column_name(e).map(SimpleAgg::Sum),
+        SelectItemKind::Avg(e) => expr_column_name(e).map(SimpleAgg::Avg),
+        SelectItemKind::CountDistinct(e) => expr_column_name(e).map(SimpleAgg::CountDistinct),
+        _ => None,
+    })
+}
+
 fn count_selected(mask: &[bool]) -> u64 {
     mask.iter().map(|&b| u64::from(b)).sum()
+}
+
+fn count_distinct_masked(table: &Table, expr: &Expr, mask: &[bool]) -> Option<u64> {
+    let name = expr_column_name(expr)?;
+    count_distinct_col_masked(table, &name, mask)
+}
+
+fn count_distinct_col_masked(table: &Table, name: &str, mask: &[bool]) -> Option<u64> {
+    let col = table.column(name).ok()?;
+    match col {
+        ColumnData::Int64(v) => {
+            let mut set = HashSet::new();
+            for (i, &x) in v.iter().enumerate() {
+                if mask.get(i).copied().unwrap_or(false) {
+                    set.insert(x);
+                }
+            }
+            Some(set.len() as u64)
+        }
+        ColumnData::Int32(v) => {
+            let mut set = HashSet::new();
+            for (i, &x) in v.iter().enumerate() {
+                if mask.get(i).copied().unwrap_or(false) {
+                    set.insert(i64::from(x));
+                }
+            }
+            Some(set.len() as u64)
+        }
+        ColumnData::Int16(v) => {
+            let mut set = HashSet::new();
+            for (i, &x) in v.iter().enumerate() {
+                if mask.get(i).copied().unwrap_or(false) {
+                    set.insert(i64::from(x));
+                }
+            }
+            Some(set.len() as u64)
+        }
+        ColumnData::Utf8(v) => {
+            let mut set = HashSet::<String>::new();
+            for (i, s) in v.iter().enumerate() {
+                if mask.get(i).copied().unwrap_or(false) {
+                    set.insert(s.clone());
+                }
+            }
+            Some(set.len() as u64)
+        }
+        _ => None,
+    }
 }
 
 fn sum_column_masked(table: &Table, name: &str, mask: &[bool]) -> Result<i128> {
