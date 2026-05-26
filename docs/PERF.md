@@ -11,7 +11,7 @@ Coldrun optimizes for ClickBench **Combined** (hot 60%, cold 20%, load 10%, disk
 
 Compare before/after on the same machine with the same `ROWS` argument.
 
-## Implemented (v0.1)
+## Implemented
 
 | Area | What |
 |------|------|
@@ -19,14 +19,16 @@ Compare before/after on the same machine with the same `ROWS` argument.
 | **Vectorized filters** | Fast paths for `AND`/`OR`, `col <> 0`, `col <> ''`, date ranges, `LIKE '%x%'` |
 | **Fast global aggregates** | `COUNT(*)` / `SUM` / `AVG` / `MIN`/`MAX` on one column without per-row interpreter |
 | **LZ4 column files** | Optional compression on flush for payloads &gt; 4 KB (backward-compatible read) |
+| **Integer GROUP BY** | Packed `u128` keys for up to two int/date group columns (`group_int.rs`) |
+| **Top-K partial sort** | `select_nth_unstable_by` before full sort when `LIMIT` + many groups |
+| **Int COUNT DISTINCT** | `HashSet<i64>` instead of string keys on numeric columns |
+| **PK zone index** | Min/max zones on `CounterID` + `EventDate`; prune dashboard filters (Q36–43) |
 
 ## Next (planned)
 
-1. **PK zone maps** on `(CounterID, EventDate, …)` — skip row ranges for dashboard queries (Q36–43)
-2. **Columnar group-by keys** — integer keys without `String` allocation per row
-3. **Top-K heaps** — `ORDER BY … LIMIT` without full sort
-4. **Parallel load** — Parquet decode threads
-5. **SIMD** — aggregations and string `contains` for `LIKE`
+1. **Parallel load** — Parquet decode threads
+2. **SIMD** — aggregations and string `contains` for `LIKE`
+3. **mmap columns** — zero-copy read for cold runs
 
 ## Honest scope
 

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::column::{ColumnData, ColumnType};
+use super::zones::ZoneIndex;
 use crate::Result;
 
 const META: &str = "meta.json";
@@ -26,6 +27,7 @@ pub struct Table {
     pub path: PathBuf,
     pub meta: TableMeta,
     columns: HashMap<String, ColumnData>,
+    zones: Option<ZoneIndex>,
 }
 
 impl Table {
@@ -41,6 +43,7 @@ impl Table {
             path,
             meta,
             columns: HashMap::new(),
+            zones: None,
         };
         table.save_meta()?;
         Ok(table)
@@ -69,11 +72,17 @@ impl Table {
                 columns.insert(col.name.clone(), ColumnData::read_file(&col_path)?);
             }
         }
+        let zones = ZoneIndex::load(&path);
         Ok(Self {
             path,
             meta,
             columns,
+            zones,
         })
+    }
+
+    pub fn zones(&self) -> Option<&ZoneIndex> {
+        self.zones.as_ref()
     }
 
     pub fn row_count(&self) -> u64 {
@@ -127,6 +136,10 @@ impl Table {
                     .join(format!("{}.col", col.name));
                 data.write_file(&path)?;
             }
+        }
+        if let Some(index) = ZoneIndex::build(self) {
+            index.write(&self.path)?;
+            self.zones = Some(index);
         }
         self.save_meta()?;
         Ok(())

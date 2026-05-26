@@ -2,6 +2,7 @@ mod column;
 mod demo;
 mod load;
 mod table;
+pub mod zones;
 
 pub use column::{ColumnData, ColumnType};
 pub use demo::load_demo_hits;

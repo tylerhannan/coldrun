@@ -15,14 +15,79 @@ pub fn build_filter_mask(
     let Some(expr) = where_expr else {
         return Ok(vec![true; row_count]);
     };
-    if let Some(mask) = try_build_mask(table, expr, row_count)? {
+    if let Some(mut mask) = try_build_mask(table, expr, row_count)? {
+        try_zone_prune(table, expr, &mut mask);
         return Ok(mask);
     }
     let mut mask = Vec::with_capacity(row_count);
     for i in 0..row_count {
         mask.push(eval_bool(table, expr, i)?);
     }
+    try_zone_prune(table, expr, &mut mask);
     Ok(mask)
+}
+
+/// If WHERE is CounterID = N plus EventDate range, clear mask bits for non-matching PK zones.
+fn try_zone_prune(table: &Table, expr: &Expr, mask: &mut [bool]) {
+    let Some(zones) = table.zones() else {
+        return;
+    };
+    let Some((counter, min_date, max_date)) = extract_counter_date_range(expr) else {
+        return;
+    };
+    zones.apply_dashboard_prune(mask, counter, min_date, max_date);
+}
+
+fn extract_counter_date_range(expr: &Expr) -> Option<(i32, i32, i32)> {
+    let mut counter = None;
+    let mut min_date = None;
+    let mut max_date = None;
+    collect_counter_date(expr, &mut counter, &mut min_date, &mut max_date);
+    Some((counter?, min_date?, max_date?))
+}
+
+fn collect_counter_date(
+    expr: &Expr,
+    counter: &mut Option<i32>,
+    min_date: &mut Option<i32>,
+    max_date: &mut Option<i32>,
+) {
+    match expr {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
+            collect_counter_date(left, counter, min_date, max_date);
+            collect_counter_date(right, counter, min_date, max_date);
+        }
+        Expr::BinaryOp {
+            left,
+            op,
+            right,
+        } => {
+            if let (Some(name), Expr::Value(rv)) = (expr_column_name(left), &**right) {
+                if name == "CounterID" && matches!(op, BinaryOperator::Eq) {
+                    if let Ok(v) = value_as_i64(rv) {
+                        *counter = Some(v as i32);
+                    }
+                }
+                if name == "EventDate" && is_date_lit(rv) {
+                    if let Ok(s) = date_str(rv) {
+                        if let Ok(d) = parse_date_lit(s) {
+                            match op {
+                                BinaryOperator::GtEq => *min_date = Some(d),
+                                BinaryOperator::LtEq => *max_date = Some(d),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Expr::Nested(inner) => collect_counter_date(inner, counter, min_date, max_date),
+        _ => {}
+    }
 }
 
 fn try_build_mask(table: &Table, expr: &Expr, row_count: usize) -> Result<Option<Vec<bool>>> {
