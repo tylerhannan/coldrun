@@ -140,32 +140,57 @@ impl ColumnData {
     }
 
     pub fn read_file(path: &Path) -> Result<Self> {
-        let mut f = File::open(path)?;
-        let mut magic = [0u8; 4];
-        f.read_exact(&mut magic)?;
-        if &magic != MAGIC {
+        let mut file = File::open(path)?;
+        let len = file.metadata()?.len() as usize;
+        if len > 64 * 1024 {
+            // SAFETY: read-only map of immutable file during decode.
+            let map = unsafe { memmap2::Mmap::map(&file)? };
+            return decode_column_file(&map[..]);
+        }
+
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+        decode_column_file(&data)
+    }
+
+    /// Append rows from another column chunk (same type).
+    pub fn extend_from(&mut self, other: &ColumnData) -> Result<()> {
+        match (self, other) {
+            (ColumnData::Int64(d), ColumnData::Int64(s)) => d.extend_from_slice(s),
+            (ColumnData::Int32(d), ColumnData::Int32(s)) => d.extend_from_slice(s),
+            (ColumnData::Int16(d), ColumnData::Int16(s)) => d.extend_from_slice(s),
+            (ColumnData::Date(d), ColumnData::Date(s)) => d.extend_from_slice(s),
+            (ColumnData::Timestamp(d), ColumnData::Timestamp(s)) => d.extend_from_slice(s),
+            (ColumnData::Utf8(d), ColumnData::Utf8(s)) => d.extend_from_slice(s),
+            _ => return Err(crate::Error::msg("extend_from type mismatch")),
+        }
+        Ok(())
+    }
+}
+
+fn decode_column_file(data: &[u8]) -> Result<ColumnData> {
+        if data.len() < 5 {
+            return Err(crate::Error::msg("column file too short"));
+        }
+        if &data[..4] != MAGIC {
             return Err(crate::Error::msg("invalid column file magic"));
         }
-        let mut first = [0u8; 1];
-        f.read_exact(&mut first)?;
-        let (col_type, encoding, mut payload) = if first[0] == FORMAT_V1 {
-            let mut type_byte = [0u8; 1];
-            f.read_exact(&mut type_byte)?;
-            let mut enc_byte = [0u8; 1];
-            f.read_exact(&mut enc_byte)?;
-            let mut rest = Vec::new();
-            f.read_to_end(&mut rest)?;
-            (parse_col_type(type_byte[0])?, enc_byte[0], rest)
+        let first = data[4];
+        let (col_type, encoding, body) = if first == FORMAT_V1 {
+            if data.len() < 7 {
+                return Err(crate::Error::msg("column file truncated"));
+            }
+            (parse_col_type(data[5])?, data[6], &data[7..])
         } else {
-            let mut rest = Vec::new();
-            f.read_to_end(&mut rest)?;
-            (parse_col_type(first[0])?, ENC_RAW, rest)
+            (parse_col_type(first)?, ENC_RAW, &data[5..])
         };
 
-        if encoding == ENC_LZ4 {
-            payload = lz4_flex::decompress_size_prepended(&payload)
-                .map_err(|e| crate::Error::msg(format!("lz4 decompress: {e}")))?;
-        }
+        let payload = if encoding == ENC_LZ4 {
+            lz4_flex::decompress_size_prepended(body)
+                .map_err(|e| crate::Error::msg(format!("lz4 decompress: {e}")))?
+        } else {
+            body.to_vec()
+        };
 
         let mut cursor = std::io::Cursor::new(payload);
         let mut count_buf = [0u8; 8];
@@ -192,7 +217,6 @@ impl ColumnData {
                 ColumnData::Utf8(strings)
             }
         })
-    }
 }
 
 fn parse_col_type(tag: u8) -> Result<ColumnType> {

@@ -14,6 +14,8 @@ anyhow = "1"
 arrow = "54"
 clap = { version = "4", features = ["derive"] }
 lz4_flex = "0.11"
+memmap2 = "0.9"
+rayon = "1.10"
 parquet = { version = "54", features = ["arrow"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
