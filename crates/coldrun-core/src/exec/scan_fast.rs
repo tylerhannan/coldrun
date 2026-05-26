@@ -18,6 +18,9 @@ pub fn try_execute_scan_fast(
     if let Some(r) = try_scan_int_eq(table, parsed, row_count)? {
         return Ok(Some(r));
     }
+    if let Some(r) = try_scan_star_like_order_limit(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
 
     if parsed.select_all || parsed.select_items.len() != 1 {
         return Ok(None);
@@ -86,6 +89,68 @@ fn try_scan_two_order(
 
     let out_col = table.column(sel_name)?;
     Ok(Some(build_scan_result(proj, out_col, &indices, parsed)?))
+}
+
+/// Q24: `SELECT * … WHERE URL LIKE '%x%' ORDER BY EventTime LIMIT n` — sort row indices only.
+fn try_scan_star_like_order_limit(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+) -> Result<Option<QueryResult>> {
+    if !parsed.select_all || parsed.order_by.len() != 1 {
+        return Ok(None);
+    }
+    let (order_expr, _desc) = &parsed.order_by[0];
+    let order_name = order_column_name(order_expr);
+    if order_name != "EventTime" {
+        return Ok(None);
+    }
+    let Some(where_expr) = parsed.where_expr.as_ref() else {
+        return Ok(None);
+    };
+    if !where_is_url_like(where_expr) {
+        return Ok(None);
+    }
+
+    let mask = build_filter_mask(table, Some(where_expr), row_count)?;
+    let time_col = table.column("EventTime")?;
+    let mut indices = indices_from_mask(&mask);
+    sort_indices_by_column(time_col, &mut indices, false);
+
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(indices.len());
+    let slice: Vec<usize> = indices.into_iter().skip(offset).take(limit).collect();
+
+    let names: Vec<String> = table.column_names().map(|s| s.to_string()).collect();
+    let mut rows = Vec::with_capacity(slice.len());
+    for i in slice {
+        let mut row = Vec::with_capacity(names.len());
+        for name in &names {
+            row.push(col_key(table.column(name)?, i));
+        }
+        rows.push(row);
+    }
+
+    Ok(Some(QueryResult {
+        columns: names,
+        rows,
+    }))
+}
+
+fn where_is_url_like(expr: &Expr) -> bool {
+    match expr {
+        Expr::Like {
+            expr: inner,
+            pattern,
+            negated: false,
+            ..
+        } => {
+            expr_column_name(inner).as_deref() == Some("URL")
+                && matches!(&**pattern, Expr::Value(_))
+        }
+        Expr::Nested(e) => where_is_url_like(e),
+        _ => false,
+    }
 }
 
 /// Q20: `SELECT UserID FROM hits WHERE UserID = ?` — no sort/limit.

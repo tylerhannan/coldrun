@@ -6,6 +6,7 @@ mod mask_util;
 mod filter_fast;
 mod group;
 mod group_int;
+mod group_fused;
 mod group_referrer;
 mod group_utf8;
 mod having;
