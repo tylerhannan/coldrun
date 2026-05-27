@@ -29,16 +29,16 @@
 | 31–33 | Tie-heavy `ORDER BY c DESC` with many count=1 pairs |
 | 41 | Same PageViews tie band — different URLHash rows at OFFSET 100 |
 
-## Hot timing (serve, Q1–39)
+## Hot timing (serve, Q1–43)
 
-Partial hot snapshot: [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md).
-
-Q40 runs on 1M (~75s hot) but is not in the Q1–39 bench snapshot yet.
+Snapshot: [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) — hot sum **5.78s** @ 1M rows (Q40 ~0.31s hot on fused path).
 
 ## Regenerate
 
 ```bash
 ./scripts/sample-parquet.sh https://datasets.clickhouse.com/hits_compatible/hits.parquet 1000000 data/hits-1m.parquet
 ./scripts/validate-parquet.sh data/hits-1m.parquet
-COLDRUN_DATA=.coldrun-validate-hits-1m_ ./scripts/bench-serve.sh 1000000 --skip-load --no-compare --write-snapshot
+COLDRUN_DATA="$PWD/.coldrun-validate-hits-1m_" BENCH_SNAPSHOT_SLUG=parquet-hits-1m \
+  env -u BENCH_QUERY_TO -u BENCH_QUERY_FROM \
+  ./scripts/bench-serve.sh 1000000 --skip-load --no-compare --write-snapshot
 ```

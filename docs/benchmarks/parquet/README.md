@@ -28,8 +28,8 @@ Logs: `logs/benchmarks/validate-*.log`
 ./scripts/measure-parquet.sh data/hits-1m.parquet
 ```
 
-**Latest @ 1M rows:** [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) (Q1–39; Q40+ blocked on engine)  
-**Validation log:** [`validation-1m.md`](validation-1m.md) — 30/43 pass vs DuckDB on same slice.
+**Latest @ 1M rows:** [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) (Q1–43 hot sum ~5.78s)  
+**Validation log:** [`validation-1m.md`](validation-1m.md) — 36/43 pass vs DuckDB on same slice.
 
 Stream a slice without the full 15 GB download:
 
