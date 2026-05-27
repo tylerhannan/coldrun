@@ -8,8 +8,8 @@
 
 | Result | Count |
 |--------|------:|
-| PASS | 36 |
-| FAIL | 7 |
+| PASS | 37 |
+| FAIL | 6 |
 | SKIP | 0 |
 
 ## Fixes in this round
@@ -24,7 +24,7 @@
 | Q | Issue |
 |---|--------|
 | 18 | No `ORDER BY` — top-10 groups are implementation-defined |
-| 19 | `extract(minute FROM EventTime)` |
+| 19 | ~~`extract(minute)`~~ fixed (fused path + empty utf8 + tie-break) |
 | 28 | `AVG(length(URL))` ~2% — residual byte/unicode or null handling |
 | 31–33 | Tie-heavy `ORDER BY c DESC` with many count=1 pairs |
 | 41 | Same PageViews tie band — different URLHash rows at OFFSET 100 |

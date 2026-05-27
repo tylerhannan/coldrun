@@ -39,6 +39,11 @@ pub fn format_timestamp_micros(micros: i64) -> String {
 }
 
 /// ClickBench / DuckDB display for `DATE_TRUNC` buckets (PDT, UTC−7).
+/// Minute of hour (0–59) from EventTime micros — matches `extract(minute FROM EventTime)`.
+pub fn event_time_minute_of_hour(micros: i64) -> i64 {
+    ((micros / 1_000_000) / 60) % 60
+}
+
 pub fn format_timestamp_micros_trunc(micros: i64) -> String {
     const PDT_MICROS: i64 = 7 * 3600 * 1_000_000;
     format_timestamp_micros(micros - PDT_MICROS)
@@ -327,7 +332,7 @@ fn eval_extract_i64(
 ) -> Result<i64> {
     let micros = eval_i64(table, expr, row)?;
     Ok(match field {
-        DateTimeField::Minute => ((micros / 1_000_000) / 60) % 60,
+        DateTimeField::Minute => event_time_minute_of_hour(micros),
         DateTimeField::Hour => ((micros / 1_000_000) / 3600) % 24,
         DateTimeField::Day => (micros / 1_000_000) / 86400,
         DateTimeField::Month => 0,

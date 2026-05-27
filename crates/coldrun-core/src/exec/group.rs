@@ -204,9 +204,7 @@ pub(crate) fn eval_proj_at_row(
     match &proj.kind {
         SelectItemKind::Column(e) | SelectItemKind::Other(e) => {
             if let Ok(s) = eval_string(table, e, row) {
-                if !s.is_empty() {
-                    return Ok(s);
-                }
+                return Ok(s);
             }
             Ok(eval_i64(table, e, row)?.to_string())
         }

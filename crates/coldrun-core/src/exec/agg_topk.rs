@@ -69,6 +69,31 @@ impl<K: Hash + Eq + Clone + Ord> StreamingTopK<K> {
         let scored = self.counts.into_iter().map(|(k, c)| (c, row(k, c)));
         top_counts(scored, self.limit, self.offset)
     }
+
+    /// Like [`finish`](Self::finish), but break count ties with `tie_key` (lexicographic ascending).
+    pub fn finish_with_tie_key<T, F, G>(self, mut row: F, mut tie_key: G) -> Vec<T>
+    where
+        F: FnMut(K, u64) -> T,
+        G: FnMut(&K) -> String,
+        T: Clone,
+    {
+        let mut pairs: Vec<(u64, String, T)> = self
+            .counts
+            .into_iter()
+            .map(|(k, c)| (c, tie_key(&k), row(k, c)))
+            .collect();
+        pairs.sort_by(|a, b| {
+            b.0
+                .cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        pairs
+            .into_iter()
+            .skip(self.offset)
+            .take(self.limit)
+            .map(|(_, _, t)| t)
+            .collect()
+    }
 }
 
 pub trait TopKCount {

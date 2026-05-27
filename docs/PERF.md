@@ -67,7 +67,7 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | **Q27 scan** | Two-key `ORDER BY EventTime, SearchPhrase` |
 | **Q29 fast path** | Single-pass (parallel @1M+) for 90× `SUM(ResolutionWidth + k)` |
 | **Q28 fused** | CounterID + `AVG(length(URL))` + HAVING without per-row interpreter |
-| **Q19 streaming top-K** | LIMIT + `ORDER BY COUNT(*)` uses pruned hash, not full group materialize |
+| **Q19 fused + top-K** | Fused path accepts `Other` projections; exact counts + tie-break on group keys |
 | **Sparse masks** | Iterate selected row indices when filter is selective |
 | **mmap columns** | Files &gt; 64 KB decoded via `memmap2` |
 | **Parallel Parquet load** | Per-batch column extract with `rayon` |

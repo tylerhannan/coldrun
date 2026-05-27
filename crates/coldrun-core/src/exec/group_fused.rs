@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 use ahash::{AHashMap, AHasher};
 use sqlparser::ast::{Expr, Value};
 
+use crate::expr::event_time_minute_of_hour;
 use crate::sql::{expr_column_name, projection_label, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, ColumnType, Table};
 use crate::Result;
@@ -551,7 +552,10 @@ fn try_fused_q19(
     if !parsed.select_items.iter().all(|p| {
         matches!(
             p.kind,
-            SelectItemKind::CountAll | SelectItemKind::Count(_) | SelectItemKind::Column(_)
+            SelectItemKind::CountAll
+                | SelectItemKind::Count(_)
+                | SelectItemKind::Column(_)
+                | SelectItemKind::Other(_)
         )
     }) {
         return Ok(None);
@@ -565,26 +569,34 @@ fn try_fused_q19(
     let offset = parsed.offset.unwrap_or(0) as usize;
 
     if limit < usize::MAX && orders_by_count_desc(parsed) {
-        let mut topk = super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, 12);
-        let mut phrase_by_hash: AHashMap<u64, String> = AHashMap::with_capacity(limit * 4 + 1);
+        let mut intern = super::utf8_arena::Utf8Intern::with_capacity(limit * 32 + 1);
+        // No incremental prune: evicting keys loses exact counts on high-cardinality groups.
+        let mut topk = super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, usize::MAX);
         for_each_selected(&mask, row_count, |i| {
             let u = users[i];
-            let minute = ((times[i] / 1_000_000) / 60) % 60;
-            let s = &phrases[i];
-            let h = hash_str(s);
-            phrase_by_hash.entry(h).or_insert_with(|| s.to_string());
-            topk.inc((u, minute, h));
+            let minute = event_time_minute_of_hour(times[i]);
+            let pid = intern.intern(&phrases[i]);
+            topk.inc((u, minute, pid));
         });
         let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-        let rows = topk.finish(|(u, minute, h), count| {
-            let phrase = phrase_by_hash.get(&h).map(|s| s.as_str()).unwrap_or("");
-            vec![
-                u.to_string(),
-                minute.to_string(),
-                phrase.to_string(),
-                count.to_string(),
-            ]
-        });
+        let rows = topk.finish_with_tie_key(
+            |(u, minute, pid), count| {
+                vec![
+                    u.to_string(),
+                    minute.to_string(),
+                    intern.get(pid).to_string(),
+                    count.to_string(),
+                ]
+            },
+            |(u, minute, pid)| {
+                format!(
+                    "{:020}\t{:02}\t{}",
+                    u,
+                    minute,
+                    intern.get(*pid)
+                )
+            },
+        );
         return Ok(Some(QueryResult { columns, rows }));
     }
 
@@ -593,7 +605,7 @@ fn try_fused_q19(
         AHashMap::with_capacity(mask.len() / 4 + 1);
     for_each_selected(&mask, row_count, |i| {
         let u = users[i];
-        let minute = ((times[i] / 1_000_000) / 60) % 60;
+        let minute = event_time_minute_of_hour(times[i]);
         let pid = phrase_ids.intern(&phrases[i]);
         *groups.entry((u, minute, pid)).or_insert(0) += 1;
     });

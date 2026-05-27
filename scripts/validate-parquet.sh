@@ -17,6 +17,8 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
 BIN="$ROOT/target/release/coldrun"
+DIFF="${DIFF:-/usr/bin/diff}"
+[ -x "$DIFF" ] || DIFF="diff"
 QUERIES="$ROOT/clickbench/coldrun/queries.sql"
 PARQUET=""
 SKIP_LOAD=0
@@ -122,7 +124,11 @@ for line in sys.stdin:
     out = []
     for p in parts:
         p = p.strip()
-        if not p:
+        if p == "":
+            out.append("")
+            continue
+        if p.lstrip("-").isdigit():
+            out.append(p)
             continue
         try:
             f = float(p)
@@ -174,7 +180,7 @@ while IFS= read -r q || [ -n "$q" ]; do
     continue
   fi
 
-  if diff -q <(normalize_result <"$crf") <(normalize_result <"$dkf") >/dev/null 2>&1; then
+  if "$DIFF" -q <(normalize_result <"$crf") <(normalize_result <"$dkf") >/dev/null 2>&1; then
     echo "PASS Q$i" | tee -a "$LOG"
     PASS=$((PASS + 1))
   else
