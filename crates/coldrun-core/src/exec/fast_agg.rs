@@ -2,6 +2,7 @@ use ahash::AHashSet;
 
 use sqlparser::ast::{BinaryOperator, Expr, Value};
 
+use crate::expr::format_date_days;
 use crate::sql::{expr_column_name, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, Table};
 use crate::Result;
@@ -491,7 +492,7 @@ fn minmax_column_masked(table: &Table, expr: &Expr, mask: &[bool], is_max: bool)
                     Some(cur) => cur.min(x),
                 });
             }
-            return opt.map(|d| d.to_string());
+            return opt.map(format_date_days);
         }
         ColumnData::Int64(v) => {
             let mut opt: Option<i64> = None;

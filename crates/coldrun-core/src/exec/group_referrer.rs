@@ -148,13 +148,13 @@ fn finish_referrer_groups(
                 if matches!(proj.kind, SelectItemKind::Other(_) | SelectItemKind::Column(_)) {
                     eval_proj_at_row(table, proj, bucket.sample_row)?
                 } else {
-                    let (_, s) = state.finish(&proj.kind, v)?;
+                    let (_, s) = state.finish(&proj.kind, v, Some(&table))?;
                     s
                 }
             } else if matches!(proj.kind, SelectItemKind::Other(_)) {
                 eval_proj_at_row(table, proj, bucket.sample_row)?
             } else {
-                let (_, s) = state.finish(&proj.kind, None)?;
+                let (_, s) = state.finish(&proj.kind, None, Some(&table))?;
                 s
             };
             row.push(val);

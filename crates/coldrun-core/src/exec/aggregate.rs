@@ -2,7 +2,7 @@ use ahash::AHashSet;
 
 use sqlparser::ast::Expr;
 
-use crate::expr::{eval_i64, eval_string};
+use crate::expr::{eval_i64, eval_string, format_date_days};
 use crate::sql::{expr_column_name, SelectItemKind};
 use crate::storage::{ColumnData, Table};
 use crate::Result;
@@ -114,6 +114,7 @@ impl AggState {
         &self,
         item: &SelectItemKind,
         key_value: Option<&str>,
+        table: Option<&Table>,
     ) -> Result<(String, String)> {
         match item {
             SelectItemKind::Column(_) => {
@@ -143,17 +144,29 @@ impl AggState {
                     .unwrap_or(0);
                 Ok(("count(distinct)".into(), n.to_string()))
             }
-            SelectItemKind::Min(_) => {
+            SelectItemKind::Min(expr) => {
                 if let Some(s) = &self.min_str {
                     return Ok(("min".into(), s.clone()));
                 }
-                Ok(("min".into(), self.min_i64.unwrap_or(0).to_string()))
+                let v = self.min_i64.unwrap_or(0);
+                if let (Some(table), Some(name)) = (table, expr_column_name(expr)) {
+                    if matches!(table.column(&name), Ok(ColumnData::Date(_))) {
+                        return Ok(("min".into(), format_date_days(v as i32)));
+                    }
+                }
+                Ok(("min".into(), v.to_string()))
             }
-            SelectItemKind::Max(_) => {
+            SelectItemKind::Max(expr) => {
                 if let Some(s) = &self.max_str {
                     return Ok(("max".into(), s.clone()));
                 }
-                Ok(("max".into(), self.max_i64.unwrap_or(0).to_string()))
+                let v = self.max_i64.unwrap_or(0);
+                if let (Some(table), Some(name)) = (table, expr_column_name(expr)) {
+                    if matches!(table.column(&name), Ok(ColumnData::Date(_))) {
+                        return Ok(("max".into(), format_date_days(v as i32)));
+                    }
+                }
+                Ok(("max".into(), v.to_string()))
             }
         }
     }
@@ -203,8 +216,8 @@ fn col_key_from_column(col: &crate::storage::ColumnData, i: usize) -> Result<Str
         ColumnData::Int64(v) => v[i].to_string(),
         ColumnData::Int32(v) => v[i].to_string(),
         ColumnData::Int16(v) => v[i].to_string(),
-        ColumnData::Date(v) => v[i].to_string(),
-        ColumnData::Timestamp(v) => v[i].to_string(),
+        ColumnData::Date(v) => format_date_days(v[i]),
+        ColumnData::Timestamp(v) => crate::expr::format_timestamp_micros(v[i]),
         ColumnData::Utf8(v) => v[i].clone(),
     })
 }
@@ -220,5 +233,5 @@ pub fn eval_global_select(
             state.update(table, item, i)?;
         }
     }
-    state.finish(item, None)
+    state.finish(item, None, Some(table))
 }

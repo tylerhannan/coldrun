@@ -4,7 +4,8 @@ use ahash::AHashMap;
 
 use sqlparser::ast::{BinaryOperator, DateTimeField, Expr, Value};
 
-use crate::sql::{projection_label, ParsedQuery, SelectItemKind};
+use crate::expr::format_date_days;
+use crate::sql::{expr_column_name, projection_label, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, ColumnType, Table};
 use crate::Result;
 
@@ -205,6 +206,20 @@ fn i64_key_at(col: &ColumnData, row: usize) -> i64 {
     }
 }
 
+fn format_packed_group_key(raw: &str, expr: &Expr, table: &Table) -> String {
+    if let Some(name) = expr_column_name(expr) {
+        if let Ok(col) = table.column(&name) {
+            return match col {
+                ColumnData::Date(_) => {
+                    format_date_days(raw.parse::<i32>().unwrap_or(0))
+                }
+                _ => raw.to_string(),
+            };
+        }
+    }
+    raw.to_string()
+}
+
 fn unpack_key(key: u128, ncols: usize) -> Vec<String> {
     match ncols {
         1 => vec![(key as i64).to_string()],
@@ -250,18 +265,20 @@ fn finish_groups(
         let mut key_idx = 0;
         for (proj, state) in parsed.select_items.iter().zip(bucket.states.iter()) {
             let val = if is_group_key_proj(proj, &parsed.group_by) {
+                let gb_expr = &parsed.group_by[key_idx];
                 let k = key.get(key_idx).cloned().unwrap_or_default();
                 key_idx += 1;
+                let k = format_packed_group_key(&k, gb_expr, table);
                 if matches!(proj.kind, SelectItemKind::Other(_) | SelectItemKind::Column(_)) {
                     k
                 } else {
-                    let (_, s) = state.finish(&proj.kind, Some(k.as_str()))?;
+                    let (_, s) = state.finish(&proj.kind, Some(k.as_str()), Some(table))?;
                     s
                 }
             } else if matches!(proj.kind, SelectItemKind::Other(_)) {
                 eval_proj_at_row(table, proj, bucket.sample_row)?
             } else {
-                let (_, s) = state.finish(&proj.kind, None)?;
+                let (_, s) = state.finish(&proj.kind, None, Some(table))?;
                 s
             };
             row.push(val);

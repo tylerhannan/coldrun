@@ -82,10 +82,21 @@ coldrun_out() {
   rm -f "$errf"
 }
 
+duckdb_hits_view_sql() {
+  cat <<SQL
+CREATE OR REPLACE TEMP VIEW hits AS
+SELECT * REPLACE (
+  date_add(DATE '1970-01-01', CAST(EventDate AS INTEGER)) AS EventDate,
+  to_timestamp(CAST(EventTime AS BIGINT)) AS EventTime
+)
+FROM read_parquet('$PARQUET');
+SQL
+}
+
 duckdb_out() {
   local q="$1"
   duckdb -batch -csv -noheader 2>/dev/null <<SQL
-CREATE OR REPLACE TEMP VIEW hits AS SELECT * FROM read_parquet('$PARQUET');
+$(duckdb_hits_view_sql)
 $q
 SQL
 }
@@ -95,9 +106,17 @@ normalize_result() {
   python3 -c '
 import re, sys
 num = re.compile(r"^[0-9eE+.\-,\t]+$")
+ts = re.compile(r"^\d{4}-\d{2}-\d{2}")
 for line in sys.stdin:
     line = line.strip()
-    if not line or not num.match(line.replace(" ", "")):
+    line = re.sub(
+        r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:[+-]\d{2}(?::\d{2})?)?",
+        r"\1",
+        line,
+    )
+    if not line:
+        continue
+    if not num.match(line.replace(" ", "")) and not ts.search(line):
         continue
     parts = re.split(r"[\t,]", line)
     out = []

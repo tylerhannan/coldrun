@@ -37,6 +37,8 @@ pub use scan::execute_scan;
 use aggregate::eval_global_select;
 use fast_agg::try_execute_global;
 use fast_q29::try_execute_q29;
+use crate::expr::{format_date_days, format_timestamp_micros};
+
 use filter::build_filter_mask;
 
 #[derive(Debug, Clone)]
@@ -50,8 +52,8 @@ pub fn col_key(col: &ColumnData, i: usize) -> String {
         ColumnData::Int64(v) => v[i].to_string(),
         ColumnData::Int32(v) => v[i].to_string(),
         ColumnData::Int16(v) => v[i].to_string(),
-        ColumnData::Date(v) => v[i].to_string(),
-        ColumnData::Timestamp(v) => v[i].to_string(),
+        ColumnData::Date(v) => format_date_days(v[i]),
+        ColumnData::Timestamp(v) => format_timestamp_micros(v[i]),
         ColumnData::Utf8(v) => v[i].clone(),
     }
 }

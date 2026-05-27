@@ -87,12 +87,13 @@ fn is_q40_shape(parsed: &ParsedQuery) -> bool {
     if parsed.group_by.len() != 5 {
         return false;
     }
-    let mut has_case = false;
-    let mut has_url = false;
+    let mut has_src = false;
+    let mut has_dst = false;
     for e in &parsed.group_by {
         match e {
-            Expr::Case { .. } => has_case = true,
-            Expr::Identifier(id) if id.value == "URL" => has_url = true,
+            Expr::Case { .. } => has_src = true,
+            Expr::Identifier(id) if id.value == "URL" || id.value == "Dst" => has_dst = true,
+            Expr::Identifier(id) if id.value == "Src" => has_src = true,
             Expr::Identifier(id) => {
                 if !matches!(
                     id.value.as_str(),
@@ -104,13 +105,16 @@ fn is_q40_shape(parsed: &ParsedQuery) -> bool {
             _ => return false,
         }
     }
-    if !has_case || !has_url {
+    if !has_src || !has_dst {
         return false;
     }
     parsed.select_items.iter().all(|p| {
         matches!(
             p.kind,
-            SelectItemKind::CountAll | SelectItemKind::Count(_) | SelectItemKind::Column(_)
+            SelectItemKind::CountAll
+                | SelectItemKind::Count(_)
+                | SelectItemKind::Column(_)
+                | SelectItemKind::Other(Expr::Case { .. })
         )
     })
 }

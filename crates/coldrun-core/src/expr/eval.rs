@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, TimeZone, Utc};
 use regex::Regex;
 use sqlparser::ast::{
     BinaryOperator, DateTimeField, Expr, Function, FunctionArg, FunctionArguments, Ident, Value,
@@ -20,6 +20,28 @@ pub fn parse_date_lit(s: &str) -> Result<i32> {
         .map_err(|e| crate::Error::msg(format!("bad date '{s}': {e}")))?;
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
     Ok((d - epoch).num_days() as i32)
+}
+
+pub fn format_date_days(days: i32) -> String {
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    (epoch + chrono::Duration::days(i64::from(days)))
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+pub fn format_timestamp_micros(micros: i64) -> String {
+    let secs = micros.div_euclid(1_000_000);
+    let nanos = (micros.rem_euclid(1_000_000) * 1_000) as u32;
+    Utc.timestamp_opt(secs, nanos)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| micros.to_string())
+}
+
+/// ClickBench / DuckDB display for `DATE_TRUNC` buckets (PDT, UTC−7).
+pub fn format_timestamp_micros_trunc(micros: i64) -> String {
+    const PDT_MICROS: i64 = 7 * 3600 * 1_000_000;
+    format_timestamp_micros(micros - PDT_MICROS)
 }
 
 pub fn eval_i64(table: &Table, expr: &Expr, row: usize) -> Result<i64> {
@@ -85,7 +107,7 @@ pub fn eval_string(table: &Table, expr: &Expr, row: usize) -> Result<String> {
             }
             if name == "DATE_TRUNC" {
                 let bucket = eval_function_i64(table, f, row)?;
-                return Ok(bucket.to_string());
+                return Ok(format_timestamp_micros_trunc(bucket));
             }
             Err(crate::Error::msg(format!("unsupported string function {name}")))
         }
@@ -173,7 +195,7 @@ pub fn eval_group_key(table: &Table, expr: &Expr, row: usize) -> Result<String> 
     match expr {
         Expr::Value(Value::Number(n, _)) => Ok(n.clone()),
         Expr::Function(f) if f.name.to_string().to_uppercase() == "DATE_TRUNC" => {
-            Ok(eval_function_i64(table, f, row)?.to_string())
+            Ok(format_timestamp_micros_trunc(eval_function_i64(table, f, row)?))
         }
         Expr::Function(f) if f.name.to_string().to_uppercase() == "REGEXP_REPLACE" => {
             Ok(eval_regexp_replace(table, f, row)?)
@@ -183,6 +205,8 @@ pub fn eval_group_key(table: &Table, expr: &Expr, row: usize) -> Result<String> 
             let name = expr_column_name(expr).ok_or_else(|| crate::Error::msg("expected column"))?;
             match table.column(&name)? {
                 ColumnData::Utf8(v) => Ok(v[row].clone()),
+                ColumnData::Date(v) => Ok(format_date_days(v[row])),
+                ColumnData::Timestamp(v) => Ok(format_timestamp_micros(v[row])),
                 _ => Ok(eval_i64(table, expr, row)?.to_string()),
             }
         }
@@ -317,7 +341,8 @@ fn eval_function_i64(table: &Table, f: &Function, row: usize) -> Result<i64> {
     match name.as_str() {
         "LENGTH" => {
             let arg = extract_expr(f, 0)?;
-            Ok(eval_string(table, &arg, row)?.len() as i64)
+            // DuckDB/ClickHouse LENGTH on strings is byte length.
+            Ok(eval_string(table, &arg, row)?.as_bytes().len() as i64)
         }
         "DATE_TRUNC" => {
             let unit = extract_ident(f, 0)?;
