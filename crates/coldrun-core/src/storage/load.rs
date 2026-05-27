@@ -3,7 +3,7 @@ use std::path::Path;
 use rayon::prelude::*;
 use arrow::array::{
     Array, Date32Array, Int16Array, Int32Array, Int64Array, LargeStringArray, StringArray,
-    TimestampMicrosecondArray,
+    TimestampMicrosecondArray, UInt8Array, UInt16Array, UInt32Array,
 };
 use arrow::datatypes::{DataType, TimeUnit};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -46,22 +46,63 @@ pub fn hits_column_schema() -> Vec<(&'static str, ColumnType)> {
     ]
 }
 
-/// Infer all loadable columns from a Parquet file schema.
+/// Infer all loadable columns from a Parquet file schema (any supported Arrow type).
+#[allow(dead_code)]
 pub fn schema_from_parquet(parquet_path: impl AsRef<Path>) -> Result<Vec<(String, ColumnType)>> {
-    let file = std::fs::File::open(parquet_path.as_ref())?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| crate::Error::msg(e.to_string()))?;
-    let arrow_schema = builder.schema().clone();
+    let fields = parquet_field_types(parquet_path.as_ref())?;
     let mut cols = Vec::new();
-    for field in arrow_schema.fields() {
-        if let Some(ty) = arrow_type_to_column(field.data_type()) {
-            cols.push((field.name().clone(), ty));
+    for (name, dt) in &fields {
+        if let Some(ty) = logical_column_type(name, dt) {
+            cols.push((name.clone(), ty));
         }
     }
     if cols.is_empty() {
         return Err(crate::Error::msg("no supported columns in parquet file"));
     }
     Ok(cols)
+}
+
+/// ClickBench `hits` columns present in the file (subset of full parquet schema).
+pub fn clickbench_parquet_schema(parquet_path: impl AsRef<Path>) -> Result<Vec<(String, ColumnType)>> {
+    let fields = parquet_field_types(parquet_path.as_ref())?;
+    let mut cols = Vec::new();
+    for (name, want_ty) in hits_column_schema() {
+        let Some(dt) = fields.get(name) else {
+            continue;
+        };
+        let Some(ty) = logical_column_type(name, dt) else {
+            continue;
+        };
+        if ty == want_ty {
+            cols.push((name.to_string(), ty));
+        }
+    }
+    if cols.is_empty() {
+        return Err(crate::Error::msg(
+            "parquet file has none of the ClickBench hits columns coldrun needs",
+        ));
+    }
+    Ok(cols)
+}
+
+fn parquet_field_types(path: &Path) -> Result<std::collections::HashMap<String, DataType>> {
+    let file = std::fs::File::open(path)?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| crate::Error::msg(e.to_string()))?;
+    let mut map = std::collections::HashMap::new();
+    for field in builder.schema().fields() {
+        map.insert(field.name().clone(), field.data_type().clone());
+    }
+    Ok(map)
+}
+
+/// Map on-disk ClickBench-compatible types to coldrun column types.
+fn logical_column_type(name: &str, dt: &DataType) -> Option<ColumnType> {
+    match name {
+        "EventTime" => Some(ColumnType::Timestamp),
+        "EventDate" => Some(ColumnType::Date),
+        _ => arrow_type_to_column(dt),
+    }
 }
 
 fn arrow_type_to_column(dt: &DataType) -> Option<ColumnType> {
@@ -82,7 +123,7 @@ pub fn load_parquet_into_table(
     parquet_path: impl AsRef<Path>,
 ) -> Result<u64> {
     let parquet_path = parquet_path.as_ref();
-    let col_schema = schema_from_parquet(parquet_path)?;
+    let col_schema = clickbench_parquet_schema(parquet_path)?;
     load_parquet_columns(db, table_name, parquet_path, &col_schema)
 }
 
@@ -146,21 +187,67 @@ pub fn load_parquet_columns(
 
 fn append_array(col: &mut ColumnData, array: &dyn Array, ty: ColumnType) -> Result<()> {
     match (col, ty) {
-        (ColumnData::Int64(c), ColumnType::Int64) => {
-            downcast_append_pod(array, c, |a: &Int64Array, i| a.value(i))?;
-        }
-        (ColumnData::Int32(c), ColumnType::Int32) => {
-            downcast_append_pod(array, c, |a: &Int32Array, i| a.value(i))?;
-        }
-        (ColumnData::Int16(c), ColumnType::Int16) => {
-            downcast_append_pod(array, c, |a: &Int16Array, i| a.value(i))?;
-        }
-        (ColumnData::Date(c), ColumnType::Date) => {
-            downcast_append_pod(array, c, |a: &Date32Array, i| a.value(i))?;
-        }
+        (ColumnData::Int64(c), ColumnType::Int64) => match array.data_type() {
+            DataType::Int64 => {
+                downcast_append_pod(array, c, |a: &Int64Array, i| a.value(i), 0i64)?;
+            }
+            other => {
+                return Err(crate::Error::msg(format!("unsupported int64 type: {other:?}")));
+            }
+        },
+        (ColumnData::Int32(c), ColumnType::Int32) => match array.data_type() {
+            DataType::Int32 => {
+                downcast_append_pod(array, c, |a: &Int32Array, i| a.value(i), 0i32)?;
+            }
+            DataType::UInt32 => {
+                downcast_append_pod(array, c, |a: &UInt32Array, i| a.value(i) as i32, 0i32)?;
+            }
+            other => {
+                return Err(crate::Error::msg(format!("unsupported int32 type: {other:?}")));
+            }
+        },
+        (ColumnData::Int16(c), ColumnType::Int16) => match array.data_type() {
+            DataType::Int16 => {
+                downcast_append_pod(array, c, |a: &Int16Array, i| a.value(i), 0i16)?;
+            }
+            DataType::UInt16 => {
+                downcast_append_pod(array, c, |a: &UInt16Array, i| a.value(i) as i16, 0i16)?;
+            }
+            DataType::UInt8 | DataType::Int8 => {
+                downcast_append_pod(array, c, |a: &UInt8Array, i| a.value(i) as i16, 0i16)?;
+            }
+            other => {
+                return Err(crate::Error::msg(format!("unsupported int16 type: {other:?}")));
+            }
+        },
+        (ColumnData::Date(c), ColumnType::Date) => match array.data_type() {
+            DataType::Date32 => {
+                downcast_append_pod(array, c, |a: &Date32Array, i| a.value(i), 0i32)?;
+            }
+            DataType::UInt16 => {
+                downcast_append_pod(array, c, |a: &UInt16Array, i| i32::from(a.value(i)), 0i32)?;
+            }
+            DataType::Int32 => {
+                downcast_append_pod(array, c, |a: &Int32Array, i| a.value(i), 0i32)?;
+            }
+            other => {
+                return Err(crate::Error::msg(format!("unsupported date type: {other:?}")));
+            }
+        },
         (ColumnData::Timestamp(c), ColumnType::Timestamp) => match array.data_type() {
             DataType::Timestamp(TimeUnit::Microsecond, _) => {
-                downcast_append_pod(array, c, |a: &TimestampMicrosecondArray, i| a.value(i))?;
+                downcast_append_pod(array, c, |a: &TimestampMicrosecondArray, i| a.value(i), 0i64)?;
+            }
+            DataType::Int64 => {
+                let a = array
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| crate::Error::msg("int64 timestamp downcast failed"))?;
+                for i in 0..a.len() {
+                    let v = if a.is_null(i) { 0 } else { a.value(i) };
+                    let micros = event_time_to_micros(v);
+                    c.push(micros)?;
+                }
             }
             other => {
                 return Err(crate::Error::msg(format!(
@@ -204,10 +291,20 @@ fn append_array(col: &mut ColumnData, array: &dyn Array, ty: ColumnType) -> Resu
     Ok(())
 }
 
+/// ClickBench `hits_compatible` stores EventTime as Unix seconds in Int64.
+fn event_time_to_micros(v: i64) -> i64 {
+    if v.abs() < 10_000_000_000_000 {
+        v.saturating_mul(1_000_000)
+    } else {
+        v
+    }
+}
+
 fn downcast_append_pod<A: Array + 'static, T: Copy, F>(
     array: &dyn Array,
     out: &mut PodStorage<T>,
     f: F,
+    null_default: T,
 ) -> Result<()>
 where
     F: Fn(&A, usize) -> T,
@@ -217,10 +314,8 @@ where
         .downcast_ref::<A>()
         .ok_or_else(|| crate::Error::msg("array downcast failed"))?;
     for i in 0..a.len() {
-        if a.is_null(i) {
-            return Err(crate::Error::msg("null value in hits dataset column"));
-        }
-        out.push(f(a, i))?;
+        let v = if a.is_null(i) { null_default } else { f(a, i) };
+        out.push(v)?;
     }
     Ok(())
 }

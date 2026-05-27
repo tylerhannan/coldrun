@@ -250,12 +250,12 @@ fn finish_groups(
         let mut key_idx = 0;
         for (proj, state) in parsed.select_items.iter().zip(bucket.states.iter()) {
             let val = if is_group_key_proj(proj, &parsed.group_by) {
-                let v = key.get(key_idx).map(|s| s.as_str());
+                let k = key.get(key_idx).cloned().unwrap_or_default();
                 key_idx += 1;
                 if matches!(proj.kind, SelectItemKind::Other(_) | SelectItemKind::Column(_)) {
-                    eval_proj_at_row(table, proj, bucket.sample_row)?
+                    k
                 } else {
-                    let (_, s) = state.finish(&proj.kind, v)?;
+                    let (_, s) = state.finish(&proj.kind, Some(k.as_str()))?;
                     s
                 }
             } else if matches!(proj.kind, SelectItemKind::Other(_)) {

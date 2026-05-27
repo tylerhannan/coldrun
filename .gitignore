@@ -4,11 +4,14 @@
 .coldrun-bench/
 .coldrun-bench-all/
 .coldrun-t/
+.coldrun-validate-*/
+.coldrun-measure-*/
 clickbench/coldrun/.clickbench/
 smoke-all.log
 logs/
 bench-regression-*.log
 hits.parquet
 *.parquet
+data/
 result.csv
 .DS_Store

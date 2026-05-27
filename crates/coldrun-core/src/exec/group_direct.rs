@@ -65,17 +65,17 @@ fn try_adv_engineid_group(
         }
     }
 
-    let mut counts = [0u64; 8];
+    let mut counts: AHashMap<i16, u64> = AHashMap::new();
     for_each_selected(&mask, row_count, |i| {
         let v = adv[i];
         if v != 0 {
-            counts[v as usize] += 1;
+            *counts.entry(v).or_insert(0) += 1;
         }
     });
 
-    let out = (0..8)
-        .filter(|&k| counts[k] > 0)
-        .map(|k| (counts[k], vec![k.to_string(), counts[k].to_string()]));
+    let out = counts
+        .into_iter()
+        .map(|(k, c)| (c, vec![k.to_string(), c.to_string()]));
     finish_count_sorted(parsed, out)
 }
 

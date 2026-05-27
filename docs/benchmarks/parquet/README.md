@@ -25,13 +25,17 @@ Logs: `logs/benchmarks/validate-*.log`
 ## 3. Hot-shaped timing on parquet load
 
 ```bash
-./scripts/measure-parquet.sh hits-1m.parquet
-# or step by step:
-./scripts/validate-parquet.sh hits-1m.parquet
-COLDRUN_DATA=.coldrun-measure-hits-1m ./scripts/bench-serve.sh 100000 --skip-load --no-compare
+./scripts/measure-parquet.sh data/hits-1m.parquet
 ```
 
-Optional snapshot under `docs/benchmarks/parquet-<name>/serve-hot.md` when using `bench-serve --write-snapshot` with `BENCH_SNAPSHOT_SLUG` set.
+**Latest @ 1M rows:** [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) (Q1–39; Q40+ blocked on engine)  
+**Validation log:** [`validation-1m.md`](validation-1m.md) — 30/43 pass vs DuckDB on same slice.
+
+Stream a slice without the full 15 GB download:
+
+```bash
+./scripts/sample-parquet.sh https://datasets.clickhouse.com/hits_compatible/hits.parquet 1000000 data/hits-1m.parquet
+```
 
 ## What this is not
 

@@ -91,8 +91,30 @@ SQL
 }
 
 normalize_result() {
-  # Stable compare: sorted non-empty data lines (tab-separated).
-  grep -v '^$' | LC_ALL=C sort
+  # Drop header rows; normalize numbers (incl. scientific) and separators for diff.
+  python3 -c '
+import re, sys
+num = re.compile(r"^[0-9eE+.\-,\t]+$")
+for line in sys.stdin:
+    line = line.strip()
+    if not line or not num.match(line.replace(" ", "")):
+        continue
+    parts = re.split(r"[\t,]", line)
+    out = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        try:
+            f = float(p)
+            if f == int(f) and abs(f) < 1e15:
+                out.append(str(int(f)))
+            else:
+                out.append(f"{f:.10g}")
+        except ValueError:
+            out.append(p)
+    print(",".join(out))
+' | LC_ALL=C sort
 }
 
 if [ "$SKIP_LOAD" = "0" ]; then

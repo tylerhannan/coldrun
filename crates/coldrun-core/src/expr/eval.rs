@@ -179,9 +179,16 @@ pub fn eval_group_key(table: &Table, expr: &Expr, row: usize) -> Result<String> 
             Ok(eval_regexp_replace(table, f, row)?)
         }
         Expr::Extract { field, expr, .. } => Ok(eval_extract_i64(table, field, expr, row)?.to_string()),
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
+            let name = expr_column_name(expr).ok_or_else(|| crate::Error::msg("expected column"))?;
+            match table.column(&name)? {
+                ColumnData::Utf8(v) => Ok(v[row].clone()),
+                _ => Ok(eval_i64(table, expr, row)?.to_string()),
+            }
+        }
         _ => {
             if let Ok(s) = eval_string(table, expr, row) {
-                if !s.is_empty() || matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_)) {
+                if !s.is_empty() {
                     return Ok(s);
                 }
             }
