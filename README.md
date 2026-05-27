@@ -45,6 +45,7 @@ Synthetic `hits` rows are generated in-process — same schema shape, not real C
 ./scripts/bench-compare.sh 100000   # before/after diff on same machine
 ./scripts/bench-regression.sh 100000  # smoke + bench-demo + logs
 ./scripts/bench-serve.sh 100000         # warm serve, hot-shaped (see docs/benchmarks/MEASUREMENT.md)
+./scripts/measure-parquet.sh hits-1m.parquet  # real parquet: validate + bench (needs duckdb)
 ./scripts/bench-clickbench.sh --demo 100000 --embedded  # ClickBench output (no per-query restart)
 ```
 

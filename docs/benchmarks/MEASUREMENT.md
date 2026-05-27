@@ -49,14 +49,24 @@ Logs (gitignored): `logs/benchmarks/serve-last.log`, `clickbench-last.log`.
 | `docs/benchmarks/demo-100k/latest.md` | Committed `bench-all` snapshot (CLI per query) |
 | `docs/benchmarks/demo-100k/serve-hot.md` | Committed `bench-serve` hot snapshot (warm server) |
 
-## Cloud / real data
+## Real data without AWS
 
-When you have a VM and `hits.parquet`:
+If you have `hits.parquet` (or a slice) on disk:
+
+| Step | Script |
+|------|--------|
+| Slice | [`sample-parquet.sh`](../../scripts/sample-parquet.sh) `hits.parquet 1000000 hits-1m.parquet` |
+| Correctness | [`validate-parquet.sh`](../../scripts/validate-parquet.sh) `hits-1m.parquet` |
+| Validate + bench | [`measure-parquet.sh`](../../scripts/measure-parquet.sh) `hits-1m.parquet` |
+
+Requires **DuckDB CLI** (`brew install duckdb`). Details: [`parquet/README.md`](parquet/README.md).
+
+## Cloud (when available)
 
 ```bash
 ./clickbench/coldrun/install
 HITS_PARQUET=/data/hits.parquet COLDRUN_DATA=/data/coldrun ./clickbench/coldrun/load
-./clickbench/coldrun/benchmark.sh   # upstream driver if present
+./clickbench/coldrun/benchmark.sh
 ```
 
-Until then, treat `bench-all` numbers as **relative** on one machine only.
+Until you have real Parquet locally, treat demo `bench-all` / `bench-serve` numbers as **relative** on one machine only.

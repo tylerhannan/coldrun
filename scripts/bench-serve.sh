@@ -95,7 +95,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-slug=$(bench_rows_slug "$ROWS")
+if [ -n "${BENCH_SNAPSHOT_SLUG:-}" ]; then
+  slug="$BENCH_SNAPSHOT_SLUG"
+else
+  slug=$(bench_rows_slug "$ROWS")
+fi
 if [ "$COMPARE_ALL" = "1" ]; then
   export BENCH_COMPARE_LATEST="$ROOT/docs/benchmarks/${slug}/latest.md"
 fi

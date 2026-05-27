@@ -10,6 +10,7 @@ Committed timing snapshots for local **demo** regression (`./scripts/bench-all.s
 | [`demo-100k/`](demo-100k/) | All 43 queries @ 100k synthetic rows — **start here** |
 | [`demo-500k/`](demo-500k/) | Heavier stress run @ 500k rows |
 | [`regression/`](regression/) | Early milestone / batch status notes (historical) |
+| [`parquet/`](parquet/) | Real `hits.parquet` validate + measure (no cloud) |
 
 ## Run locally
 
