@@ -1,5 +1,5 @@
 #!/bin/bash
-# Capture regression logs for overnight runs (not committed; see docs/overnight/).
+# Capture regression logs for local bench runs (not committed; see docs/benchmarks/).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -9,7 +9,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
 ROWS="${1:-100000}"
-LOGDIR="${LOGDIR:-$ROOT/logs/overnight}"
+LOGDIR="${LOGDIR:-$ROOT/logs/benchmarks}"
 mkdir -p "$LOGDIR"
 
 cargo build --release -p coldrun-cli -q

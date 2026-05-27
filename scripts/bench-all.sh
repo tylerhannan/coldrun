@@ -1,5 +1,6 @@
 #!/bin/bash
 # Time all 43 ClickBench queries on demo data (no Parquet download).
+# Commit snapshots: docs/benchmarks/demo-100k/latest.md
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

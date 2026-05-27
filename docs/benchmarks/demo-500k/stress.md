@@ -1,7 +1,7 @@
-# Stress — 500k demo rows (overnight item 2)
+# Stress — 500k demo rows
 
 **Date:** 2026-05-26  
-**Command:** `./scripts/overnight-regression.sh 500000`
+**Command:** `./scripts/bench-regression.sh 500000`
 
 ## smoke-all
 

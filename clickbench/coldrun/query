@@ -1,10 +1,17 @@
 #!/bin/bash
-# Reads SQL from stdin. Stdout: results. Stderr: runtime in seconds (last line).
+# ClickBench query contract: stdout = results, stderr = timing (seconds, last line).
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="${COLDRUN_ROOT:-$(cd "$DIR/../.." && pwd)}"
 COLDRUN="${COLDRUN_BIN:-$ROOT/target/release/coldrun}"
 DATA_DIR="${COLDRUN_DATA:-$DIR/.clickbench}"
+HOST="${COLDRUN_HOST:-127.0.0.1:9000}"
 
-"$COLDRUN" --data-dir "$DATA_DIR" local
+export COLDRUN_BENCH=1
+
+if ./check >/dev/null 2>&1; then
+  "$COLDRUN" --data-dir "$DATA_DIR" client --host "$HOST"
+else
+  "$COLDRUN" --data-dir "$DATA_DIR" local
+fi

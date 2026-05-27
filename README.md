@@ -41,9 +41,10 @@ Synthetic `hits` rows are generated in-process — same schema shape, not real C
 ```bash
 ./scripts/smoke-demo.sh          # queries 1–15, ~10k rows (default)
 ./scripts/smoke-all.sh           # all 43 queries; optional row count, e.g. ./scripts/smoke-all.sh 100000
-./scripts/bench-all.sh 100000       # time every query (see docs/overnight/)
+./scripts/bench-all.sh 100000       # time every query (see docs/benchmarks/)
 ./scripts/bench-compare.sh 100000   # before/after diff on same machine
-./scripts/overnight-regression.sh 100000  # smoke + bench Q1–10
+./scripts/bench-regression.sh 100000  # smoke + bench-demo + logs
+./scripts/bench-clickbench.sh --demo 100000 --embedded  # ClickBench format (serve + 3 tries)
 ```
 
 Details: [`docs/SMOKE-DEMO.md`](docs/SMOKE-DEMO.md) · [`docs/PERF.md`](docs/PERF.md) · CI on push
@@ -104,7 +105,7 @@ Demo @ 100k is **43/43 correct**; **total ~0.16s** for 43 queries (pass 11). Nex
 1. **Q23 / Q40** — further dashboard / multi-agg tuning on demo
 2. **Real-data EventTime scan** — zone merge when row order ≠ time order
 
-Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/overnight/bench-all-100k-pass11.md`](docs/overnight/bench-all-100k-pass11.md)
+Per-query notes: [`docs/perf/`](docs/perf/) · timings: [`docs/benchmarks/demo-100k/latest.md`](docs/benchmarks/demo-100k/latest.md)
 
 ## Out of scope
 

@@ -11,11 +11,12 @@ Coldrun optimizes for ClickBench **Combined** (hot 60%, cold 20%, load 10%, disk
 
 Compare before/after on the same machine with the same `ROWS` argument.
 
-Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
+Committed bench snapshots: [`docs/benchmarks/`](benchmarks/) · latest all-43 table: [`demo-100k/latest.md`](benchmarks/demo-100k/latest.md).
 
 ```bash
-./scripts/overnight-regression.sh 100000   # item 1 baseline
-./scripts/overnight-regression.sh 500000   # item 2 stress
+./scripts/bench-all.sh 100000              # time all 43 queries
+./scripts/bench-regression.sh 100000       # smoke + bench-demo + logs
+./scripts/bench-regression.sh 500000       # stress @ 500k
 ```
 
 ## Implemented
@@ -80,21 +81,21 @@ Overnight regression summaries (committed): [`docs/overnight/`](overnight/).
 | round 1–3 | Int GROUP BY, top-K, zones |
 | round 4 | Multi global agg, global COUNT DISTINCT |
 | round 5 | Scan sort fast path, hash reserve, in-place mask AND/OR |
-| overnight 1–2 | Regression script; 100k/500k baselines in `docs/overnight/` |
-| overnight 4–11 | Q27/Q29 fast paths, sparse masks, mmap, rayon load, bench-all, CI |
+| regression script | `bench-regression.sh`; logs under `logs/benchmarks/` |
+| bench-all + CI | Q27/Q29 fast paths, sparse masks, mmap, rayon load, all-43 bench |
 | batch 2 (12–17) | bench-all baseline, memchr LIKE, IN-list, Q7 min/max, ahash, README/CI badge |
 | batch 3 (18–21) | Referer GROUP BY, 4-key int GROUP BY, HAVING shortcut, harness README, bench-compare |
 | Q1–Q43 pass | Utf8 GROUP BY, top-K alias fix, Q19 minute extract, Q20 eq scan — see [`perf/`](perf/) |
 | fused kernels | `group_fused.rs`: int-pair aggs (Q31–33), utf8 COUNT, int+utf8, Q19 triple, int4 COUNT, Q24 scan |
-| pass 3 | Zone v1 pre-agg, sparse dashboard masks, `group_direct`, `group_sorted`, utf8 arena, SIMD nonzero — [`bench-all-100k-pass3.md`](overnight/bench-all-100k-pass3.md) |
-| pass 4 | `demo_near_unique` O(limit) paths (Q19/Q35/Q36), Q40 CASE fused, Q19 utf8 intern — [`bench-all-100k-pass4.md`](overnight/bench-all-100k-pass4.md) |
-| pass 5 | Sharded Q31–33, fused Q11/Q22/Q23, near-unique Q17–18, DISTINCT intern — [`bench-all-100k-pass5.md`](overnight/bench-all-100k-pass5.md) |
-| pass 6 | `PodStorage`/`Arc<[T]>`, StreamingTopK utf8 COUNT, Q24 partial sort, Q6 intern — [`bench-all-100k-pass6.md`](overnight/bench-all-100k-pass6.md) |
-| pass 7 | Q24 two-phase I/O, near-unique O(limit) GROUP BY, StreamingAggTopK int-pair — [`bench-all-100k-pass7.md`](overnight/bench-all-100k-pass7.md) |
-| pass 8 | Metadata-only COUNT(*), near-unique Q16/Q22/Q23, Q25 partial sort, Q21 LIKE count — [`bench-all-100k-pass8.md`](overnight/bench-all-100k-pass8.md) |
-| pass 9 | Row-indexed Q24 `project_rows`, fused AND filter, zone v2 EventTime — [`bench-all-100k-pass9.md`](overnight/bench-all-100k-pass9.md) |
-| pass 10 | Utf8 `.col.idx` sidecar, parallel `project_rows`, streaming top-K Q25–26 — [`bench-all-100k-pass10.md`](overnight/bench-all-100k-pass10.md) |
-| pass 11 | Zone EventTime top-K, Q6 ahash DISTINCT, Q23/Q27 scan filters — [`bench-all-100k-pass11.md`](overnight/bench-all-100k-pass11.md) |
+| pass 3 | Zone v1 pre-agg, sparse dashboard masks, `group_direct`, `group_sorted`, utf8 arena, SIMD nonzero — [`pass-03.md`](benchmarks/demo-100k/pass-03.md) |
+| pass 4 | `demo_near_unique` O(limit) paths (Q19/Q35/Q36), Q40 CASE fused, Q19 utf8 intern — [`pass-04.md`](benchmarks/demo-100k/pass-04.md) |
+| pass 5 | Sharded Q31–33, fused Q11/Q22/Q23, near-unique Q17–18, DISTINCT intern — [`pass-05.md`](benchmarks/demo-100k/pass-05.md) |
+| pass 6 | `PodStorage`/`Arc<[T]>`, StreamingTopK utf8 COUNT, Q24 partial sort, Q6 intern — [`pass-06.md`](benchmarks/demo-100k/pass-06.md) |
+| pass 7 | Q24 two-phase I/O, near-unique O(limit) GROUP BY, StreamingAggTopK int-pair — [`pass-07.md`](benchmarks/demo-100k/pass-07.md) |
+| pass 8 | Metadata-only COUNT(*), near-unique Q16/Q22/Q23, Q25 partial sort, Q21 LIKE count — [`pass-08.md`](benchmarks/demo-100k/pass-08.md) |
+| pass 9 | Row-indexed Q24 `project_rows`, fused AND filter, zone v2 EventTime — [`pass-09.md`](benchmarks/demo-100k/pass-09.md) |
+| pass 10 | Utf8 `.col.idx` sidecar, parallel `project_rows`, streaming top-K Q25–26 — [`pass-10.md`](benchmarks/demo-100k/pass-10.md) |
+| pass 11 | Zone EventTime top-K, Q6 ahash DISTINCT, Q23/Q27 scan filters — [`pass-11.md`](benchmarks/demo-100k/pass-11.md) |
 
 ## Next (planned)
 

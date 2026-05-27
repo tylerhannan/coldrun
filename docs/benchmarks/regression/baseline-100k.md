@@ -1,7 +1,7 @@
-# Baseline — 100k demo rows (overnight item 1)
+# Baseline — 100k demo rows
 
 **Date:** 2026-05-26  
-**Command:** `./scripts/overnight-regression.sh 100000`
+**Command:** `./scripts/bench-regression.sh 100000`
 
 ## smoke-all
 

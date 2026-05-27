@@ -42,6 +42,7 @@ On a laptop, use synthetic data instead:
 ./scripts/smoke-all.sh
 ./scripts/bench-all.sh 100000
 ./scripts/bench-compare.sh 100000   # before/after regression
+./scripts/bench-clickbench.sh --demo 100000 --embedded  # ClickBench output (serve + 3×/query)
 ```
 
-See [`docs/PERF.md`](../../docs/PERF.md) for optimization notes and committed overnight baselines.
+See [`docs/PERF.md`](../../docs/PERF.md) for optimization notes and committed bench snapshots in [`docs/benchmarks/`](../../docs/benchmarks/).

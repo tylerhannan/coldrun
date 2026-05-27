@@ -8,7 +8,7 @@
 |---|------|--------|--------|
 | 1 | Regression script + 100k baseline | Done | `193eb9c` |
 | 2 | 500k stress run | Done | `707dfd9` |
-| 3 | PERF.md links to overnight docs | Done | `a968055` |
+| 3 | PERF.md links to benchmark docs | Done | `a968055` |
 | 4 | Q27 two-column ORDER BY scan | Done | `b0183cd` |
 | 5 | Q29 wide SUM fast path | Done | `4d92a87` |
 | 6 | Sparse mask iteration (group) | Done | `3dfd120` |
@@ -21,7 +21,7 @@
 ## Quick commands
 
 ```bash
-./scripts/overnight-regression.sh 100000
+./scripts/bench-regression.sh 100000
 ./scripts/bench-all.sh 100000
 ./scripts/smoke-all.sh 100000
 ```

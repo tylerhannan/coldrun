@@ -1,6 +1,21 @@
 #!/bin/bash
+# Server is up and data is loaded.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="${COLDRUN_DATA:-$DIR/.clickbench}"
+HOST="${COLDRUN_HOST:-127.0.0.1:9000}"
+PID_FILE="${COLDRUN_PID_FILE:-$DATA_DIR/serve.pid}"
+
 test -f "$DATA_DIR/manifest.json"
+test -f "$PID_FILE"
+kill -0 "$(cat "$PID_FILE")"
+
+host="${HOST%:*}"
+port="${HOST##*:}"
+if command -v nc >/dev/null 2>&1; then
+  nc -z "$host" "$port"
+else
+  # bash 4.1+ / macOS bash with /dev/tcp
+  (echo >/dev/tcp/"$host"/"$port") >/dev/null 2>&1
+fi

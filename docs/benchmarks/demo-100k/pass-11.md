@@ -1,6 +1,6 @@
-# Bench all 43 queries @ 100k (pass 11)
+# Pass 11 — demo 100k
 
-`./scripts/bench-all.sh 100000` after pass 11.
+`./scripts/bench-all.sh 100000` after pass 11. Full 43-query table: [`latest.md`](latest.md).
 
 | Q | pass 10 | pass 11 | Notes |
 |---|---------|---------|-------|

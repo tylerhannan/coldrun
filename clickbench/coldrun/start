@@ -1,3 +1,19 @@
 #!/bin/bash
-# Embedded benchmark mode: no daemon.
-exit 0
+# Start coldrun serve (ClickBench lifecycle).
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="${COLDRUN_ROOT:-$(cd "$DIR/../.." && pwd)}"
+COLDRUN="${COLDRUN_BIN:-$ROOT/target/release/coldrun}"
+DATA_DIR="${COLDRUN_DATA:-$DIR/.clickbench}"
+HOST="${COLDRUN_HOST:-127.0.0.1:9000}"
+PID_FILE="${COLDRUN_PID_FILE:-$DATA_DIR/serve.pid}"
+LOG_FILE="${COLDRUN_SERVE_LOG:-$DATA_DIR/serve.log}"
+
+mkdir -p "$DATA_DIR"
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+  exit 0
+fi
+
+nohup "$COLDRUN" --data-dir "$DATA_DIR" serve --listen "$HOST" >>"$LOG_FILE" 2>&1 &
+echo $! >"$PID_FILE"
