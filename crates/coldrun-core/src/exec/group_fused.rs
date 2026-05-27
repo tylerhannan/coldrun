@@ -51,6 +51,9 @@ pub fn try_execute_group_fused(
     if let Some(r) = try_fused_region_aggs(table, parsed, row_count)? {
         return Ok(Some(r));
     }
+    if let Some(r) = try_fused_counter_avg_url_len(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
     if let Some(r) = try_fused_int_pair_aggs(table, parsed, row_count)? {
         return Ok(Some(r));
     }
@@ -558,6 +561,33 @@ fn try_fused_q19(
         return Ok(empty_result(parsed));
     };
 
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+
+    if limit < usize::MAX && orders_by_count_desc(parsed) {
+        let mut topk = super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, 12);
+        let mut phrase_by_hash: AHashMap<u64, String> = AHashMap::with_capacity(limit * 4 + 1);
+        for_each_selected(&mask, row_count, |i| {
+            let u = users[i];
+            let minute = ((times[i] / 1_000_000) / 60) % 60;
+            let s = &phrases[i];
+            let h = hash_str(s);
+            phrase_by_hash.entry(h).or_insert_with(|| s.to_string());
+            topk.inc((u, minute, h));
+        });
+        let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+        let rows = topk.finish(|(u, minute, h), count| {
+            let phrase = phrase_by_hash.get(&h).map(|s| s.as_str()).unwrap_or("");
+            vec![
+                u.to_string(),
+                minute.to_string(),
+                phrase.to_string(),
+                count.to_string(),
+            ]
+        });
+        return Ok(Some(QueryResult { columns, rows }));
+    }
+
     let mut phrase_ids = super::utf8_arena::Utf8Intern::with_capacity(mask.len() / 4 + 1);
     let mut groups: AHashMap<(i64, i64, u32), u64> =
         AHashMap::with_capacity(mask.len() / 4 + 1);
@@ -580,6 +610,167 @@ fn try_fused_q19(
         )
     });
     finish_count_sorted(parsed, out)
+}
+
+/// Q28: CounterID + AVG(length(URL)) + COUNT(*) with HAVING COUNT(*) > N.
+fn try_fused_counter_avg_url_len(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.group_by.len() != 1 {
+        return Ok(None);
+    }
+    let resolved = resolve_group_expr(&parsed.group_by[0], &parsed.select_items);
+    let Expr::Identifier(id) = &resolved else {
+        return Ok(None);
+    };
+    if id.value != "CounterID" {
+        return Ok(None);
+    }
+    let Some(threshold) = parse_having_count_gt(parsed.having.as_ref()) else {
+        return Ok(None);
+    };
+    let mut has_avg_len = false;
+    let mut has_count = false;
+    for p in &parsed.select_items {
+        match &p.kind {
+            SelectItemKind::Avg(e) => {
+                if is_length_url(e) {
+                    has_avg_len = true;
+                }
+            }
+            SelectItemKind::CountAll | SelectItemKind::Count(_) => has_count = true,
+            SelectItemKind::Column(_) => {}
+            _ => return Ok(None),
+        }
+    }
+    if !has_avg_len || !has_count {
+        return Ok(None);
+    }
+
+    let counter = table.column("CounterID")?;
+    let ColumnData::Utf8(urls) = table.column("URL")? else {
+        return Ok(None);
+    };
+
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
+    };
+
+    #[derive(Default)]
+    struct Bucket {
+        sum_len: u128,
+        count: u64,
+    }
+
+    let mut groups: AHashMap<i32, Bucket> = AHashMap::with_capacity(256);
+    match counter {
+        ColumnData::Int32(cols) => {
+            for_each_selected(&mask, row_count, |i| {
+                let b = groups.entry(cols[i]).or_default();
+                b.sum_len += urls[i].as_bytes().len() as u128;
+                b.count += 1;
+            });
+        }
+        ColumnData::Int16(cols) => {
+            for_each_selected(&mask, row_count, |i| {
+                let b = groups.entry(i32::from(cols[i])).or_default();
+                b.sum_len += urls[i].as_bytes().len() as u128;
+                b.count += 1;
+            });
+        }
+        _ => return Ok(None),
+    }
+
+    let mut scored: Vec<(f64, Vec<String>)> = groups
+        .into_iter()
+        .filter(|(_, b)| b.count > threshold)
+        .map(|(cid, b)| {
+            let avg = b.sum_len as f64 / b.count as f64;
+            (
+                avg,
+                vec![cid.to_string(), format!("{avg}"), b.count.to_string()],
+            )
+        })
+        .collect();
+
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let rows: Vec<Vec<String>> = scored
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(_, r)| r)
+        .collect();
+
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+    Ok(Some(QueryResult { columns, rows }))
+}
+
+fn is_length_url(expr: &Expr) -> bool {
+    let Expr::Function(f) = expr else {
+        return false;
+    };
+    if f.name.to_string().to_uppercase() != "LENGTH" {
+        return false;
+    }
+    let Ok(arg) = extract_function_arg0(f) else {
+        return false;
+    };
+    matches!(arg, Expr::Identifier(id) if id.value == "URL")
+}
+
+fn extract_function_arg0(f: &sqlparser::ast::Function) -> Result<&Expr> {
+    use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
+    let args = match &f.args {
+        FunctionArguments::List(l) => &l.args,
+        _ => return Err(crate::Error::msg("expected args")),
+    };
+    let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(e))) = args.first() else {
+        return Err(crate::Error::msg("expected arg"));
+    };
+    Ok(e)
+}
+
+fn parse_having_count_gt(having: Option<&Expr>) -> Option<u64> {
+    let having = having?;
+    let Expr::BinaryOp {
+        left,
+        op: sqlparser::ast::BinaryOperator::Gt,
+        right,
+    } = having
+    else {
+        return None;
+    };
+    let Expr::Function(f) = &**left else {
+        return None;
+    };
+    if f.name.to_string().to_uppercase() != "COUNT" {
+        return None;
+    }
+    let Expr::Value(sqlparser::ast::Value::Number(n, _)) = &**right else {
+        return None;
+    };
+    n.parse().ok()
+}
+
+fn orders_by_count_desc(parsed: &ParsedQuery) -> bool {
+    let Some((expr, desc)) = parsed.order_by.first() else {
+        return false;
+    };
+    if !*desc {
+        return false;
+    }
+    match expr {
+        Expr::Function(f) if f.name.to_string().to_uppercase() == "COUNT" => true,
+        Expr::Identifier(id) => parsed.select_items.iter().any(|p| {
+            matches!(&p.kind, SelectItemKind::CountAll | SelectItemKind::Count(_))
+                && p.alias.as_deref() == Some(&id.value)
+        }),
+        _ => false,
+    }
 }
 
 /// Q11/14: utf8 key + COUNT(DISTINCT UserID).

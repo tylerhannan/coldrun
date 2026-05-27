@@ -1,5 +1,8 @@
 //! Fast path for ClickBench Q29: many `SUM(ResolutionWidth + k)` in one SELECT.
 
+use rayon::prelude::*;
+use sqlparser::ast::Expr;
+
 use crate::sql::{ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, Table};
 use crate::Result;
@@ -22,17 +25,55 @@ pub fn try_execute_q29(
     };
 
     let n = row_count.min(widths.len());
-    let mut columns = Vec::with_capacity(parsed.select_items.len());
-    let mut values = Vec::with_capacity(parsed.select_items.len());
+    let ks: Vec<i16> = parsed
+        .select_items
+        .iter()
+        .map(|proj| match &proj.kind {
+            SelectItemKind::Sum(expr) => {
+                if matches!(expr, Expr::Identifier(id) if id.value == "ResolutionWidth") {
+                    Ok(0i16)
+                } else {
+                    parse_resolution_plus_k(expr)
+                }
+            }
+            _ => Err(crate::Error::msg("expected sum")),
+        })
+        .collect::<Result<_>>()?;
 
-    for proj in &parsed.select_items {
-        columns.push(projection_label(proj));
-        let sum = match &proj.kind {
-            SelectItemKind::Sum(expr) => sum_resolution_plus_k(widths, n, expr)?,
-            _ => return Ok(None),
-        };
-        values.push(sum.to_string());
-    }
+    let sums: Vec<i128> = if n > 50_000 {
+        widths
+            .par_iter()
+            .take(n)
+            .fold(
+                || vec![0i128; ks.len()],
+                |mut acc, &w| {
+                    for (sum, &k) in acc.iter_mut().zip(ks.iter()) {
+                        *sum += i64::from(w.saturating_add(k)) as i128;
+                    }
+                    acc
+                },
+            )
+            .reduce(
+                || vec![0i128; ks.len()],
+                |mut a, b| {
+                    for (x, y) in a.iter_mut().zip(b) {
+                        *x += y;
+                    }
+                    a
+                },
+            )
+    } else {
+        let mut acc = vec![0i128; ks.len()];
+        for &w in widths.iter().take(n) {
+            for (sum, &k) in acc.iter_mut().zip(ks.iter()) {
+                *sum += i64::from(w.saturating_add(k)) as i128;
+            }
+        }
+        acc
+    };
+
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+    let values: Vec<String> = sums.iter().map(|s| s.to_string()).collect();
 
     Ok(Some(QueryResult {
         columns,
@@ -53,20 +94,8 @@ fn is_q29_shape(parsed: &ParsedQuery) -> bool {
         .all(|p| matches!(p.kind, SelectItemKind::Sum(_)))
 }
 
-fn sum_resolution_plus_k(widths: &[i16], n: usize, expr: &sqlparser::ast::Expr) -> Result<i128> {
-    let k = match expr {
-        sqlparser::ast::Expr::Identifier(id) if id.value == "ResolutionWidth" => 0,
-        _ => parse_resolution_plus_k(expr)?,
-    };
-    let mut sum = 0i128;
-    for &w in widths.iter().take(n) {
-        sum += i64::from(w.saturating_add(k)) as i128;
-    }
-    Ok(sum)
-}
-
-fn parse_resolution_plus_k(expr: &sqlparser::ast::Expr) -> Result<i16> {
-    use sqlparser::ast::{BinaryOperator, Expr, Value};
+fn parse_resolution_plus_k(expr: &Expr) -> Result<i16> {
+    use sqlparser::ast::{BinaryOperator, Value};
     let Expr::BinaryOp {
         left,
         op: BinaryOperator::Plus,

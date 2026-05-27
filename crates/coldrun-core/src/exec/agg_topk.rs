@@ -13,21 +13,27 @@ pub struct StreamingTopK<K: Hash + Eq + Clone> {
     counts: AHashMap<K, u64>,
     limit: usize,
     offset: usize,
+    prune_factor: usize,
 }
 
 impl<K: Hash + Eq + Clone + Ord> StreamingTopK<K> {
     pub fn new(limit: usize, offset: usize) -> Self {
+        Self::with_prune_factor(limit, offset, 64)
+    }
+
+    pub fn with_prune_factor(limit: usize, offset: usize, prune_factor: usize) -> Self {
         Self {
             counts: AHashMap::new(),
             limit,
             offset,
+            prune_factor: prune_factor.max(4),
         }
     }
 
     pub fn inc(&mut self, key: K) {
         *self.counts.entry(key).or_insert(0) += 1;
         let need = self.limit.saturating_add(self.offset);
-        if need > 0 && self.counts.len() > need.saturating_mul(64) {
+        if need > 0 && self.counts.len() > need.saturating_mul(self.prune_factor) {
             self.prune();
         }
     }
@@ -74,6 +80,7 @@ pub struct StreamingAggTopK<K: Hash + Eq + Clone, A> {
     map: AHashMap<K, A>,
     limit: usize,
     offset: usize,
+    prune_factor: usize,
 }
 
 impl<K: Hash + Eq + Clone + Ord, A: TopKCount + Default> StreamingAggTopK<K, A> {
@@ -82,6 +89,7 @@ impl<K: Hash + Eq + Clone + Ord, A: TopKCount + Default> StreamingAggTopK<K, A> 
             map: AHashMap::new(),
             limit,
             offset,
+            prune_factor: 64,
         }
     }
 
@@ -89,7 +97,7 @@ impl<K: Hash + Eq + Clone + Ord, A: TopKCount + Default> StreamingAggTopK<K, A> 
         let e = self.map.entry(key).or_default();
         f(e);
         let need = self.limit.saturating_add(self.offset);
-        if need > 0 && self.map.len() > need.saturating_mul(64) {
+        if need > 0 && self.map.len() > need.saturating_mul(self.prune_factor) {
             self.prune();
         }
     }
