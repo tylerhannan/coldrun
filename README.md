@@ -44,7 +44,8 @@ Synthetic `hits` rows are generated in-process — same schema shape, not real C
 ./scripts/bench-all.sh 100000       # time every query (see docs/benchmarks/)
 ./scripts/bench-compare.sh 100000   # before/after diff on same machine
 ./scripts/bench-regression.sh 100000  # smoke + bench-demo + logs
-./scripts/bench-clickbench.sh --demo 100000 --embedded  # ClickBench format (serve + 3 tries)
+./scripts/bench-serve.sh 100000         # warm serve, hot-shaped (see docs/benchmarks/MEASUREMENT.md)
+./scripts/bench-clickbench.sh --demo 100000 --embedded  # ClickBench output (no per-query restart)
 ```
 
 Details: [`docs/SMOKE-DEMO.md`](docs/SMOKE-DEMO.md) · [`docs/PERF.md`](docs/PERF.md) · CI on push

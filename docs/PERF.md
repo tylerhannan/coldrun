@@ -14,10 +14,13 @@ Compare before/after on the same machine with the same `ROWS` argument.
 Committed bench snapshots: [`docs/benchmarks/`](benchmarks/) · latest all-43 table: [`demo-100k/latest.md`](benchmarks/demo-100k/latest.md).
 
 ```bash
-./scripts/bench-all.sh 100000              # time all 43 queries
+./scripts/bench-all.sh 100000              # dev regression (CLI per query — not ClickBench hot)
+./scripts/bench-serve.sh 100000              # warm serve, 3 tries, hot summary on stderr
 ./scripts/bench-regression.sh 100000       # smoke + bench-demo + logs
 ./scripts/bench-regression.sh 500000       # stress @ 500k
 ```
+
+Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md).
 
 ## Implemented
 

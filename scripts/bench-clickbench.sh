@@ -4,7 +4,11 @@
 # Usage:
 #   ./scripts/bench-clickbench.sh --demo 100000     # synthetic hits (default)
 #   ./scripts/bench-clickbench.sh --skip-load       # reuse COLDRUN_DATA
+#   ./scripts/bench-clickbench.sh --from 1 --to 5   # subset of queries
+#   ./scripts/bench-clickbench.sh --queries 1,6,23  # explicit query numbers
 #   ./scripts/bench-clickbench.sh hits.parquet      # full parquet load (slow/large)
+#
+# For warm-server hot timing without per-query restart, prefer bench-serve.sh.
 #
 # Output: Load time, Data size, 43 lines of [t1,t2,t3], plus result.csv in clickbench/coldrun/
 set -euo pipefail
@@ -38,8 +42,21 @@ while [ $# -gt 0 ]; do
       COLDRUN_SKIP_LOAD=1
       shift
       ;;
+    --from)
+      export BENCH_QUERY_FROM="${2:?}"
+      shift 2
+      ;;
+    --to)
+      export BENCH_QUERY_TO="${2:?}"
+      shift 2
+      ;;
+    --queries)
+      export BENCH_QUERY_LIST="$(echo "${2:?}" | tr ',' ' ')"
+      shift 2
+      ;;
     --embedded)
       export BENCH_RESTARTABLE=no
+      export BENCH_PRINT_HOT_SUMMARY=1
       shift
       ;;
     *)

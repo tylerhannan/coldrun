@@ -1,5 +1,7 @@
 #!/bin/bash
 # Time all 43 ClickBench queries on demo data (no Parquet download).
+# Dev/regression only: spawns a new CLI process per query (not ClickBench hot scoring).
+# For warm-server timing use ./scripts/bench-serve.sh — see docs/benchmarks/MEASUREMENT.md
 # Commit snapshots: docs/benchmarks/demo-100k/latest.md
 set -euo pipefail
 
