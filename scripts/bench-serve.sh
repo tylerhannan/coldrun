@@ -6,7 +6,8 @@
 #   ./scripts/bench-serve.sh 100000
 #   ./scripts/bench-serve.sh 100000 --from 1 --to 10
 #   ./scripts/bench-serve.sh 100000 --queries 1,6,23,40
-#   ./scripts/bench-serve.sh 100000 --compare-only    # Q1 CLI vs serve, then exit
+#   ./scripts/bench-serve.sh 100000 --write-snapshot   # update docs/benchmarks/demo-100k/serve-hot.md
+#   ./scripts/bench-serve.sh 100000 --compare-only     # Q1 CLI vs serve, then exit
 #
 # Output: Load time, Data size, [t1,t2,t3], lines + hot summary on stderr.
 # Artifacts: clickbench/coldrun/result.csv, logs/benchmarks/serve-last.log
@@ -26,8 +27,11 @@ export BENCH_DURABLE=no
 export BENCH_TRIES=3
 export BENCH_PROGRESS=1
 export BENCH_PRINT_HOT_SUMMARY=1
+export BENCH_PRINT_TOP_SLOW=1
 
 BENCH="$ROOT/clickbench/coldrun"
+# shellcheck source=lib/bench-report.sh
+source "$BENCH/lib/bench-report.sh"
 chmod +x "$BENCH"/*.sh "$BENCH"/query "$BENCH"/lib/*.sh 2>/dev/null || true
 
 cargo build --release -p coldrun-cli -q
@@ -36,33 +40,47 @@ ROWS=100000
 SKIP_LOAD=0
 COMPARE_LOCAL=0
 COMPARE_ONLY=0
+WRITE_SNAPSHOT=0
+COMPARE_ALL=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --from)
       export BENCH_QUERY_FROM="${2:?}"
+      COMPARE_ALL=0
       shift 2
       ;;
     --to)
       export BENCH_QUERY_TO="${2:?}"
+      COMPARE_ALL=0
       shift 2
       ;;
     --queries)
       list=$(echo "${2:?}" | tr ',' ' ')
       export BENCH_QUERY_LIST="$list"
+      COMPARE_ALL=0
       shift 2
       ;;
     --skip-load)
       SKIP_LOAD=1
       shift
       ;;
+    --write-snapshot)
+      WRITE_SNAPSHOT=1
+      shift
+      ;;
+    --no-compare)
+      COMPARE_ALL=0
+      shift
+      ;;
     --compare-only)
       COMPARE_LOCAL=1
       COMPARE_ONLY=1
+      COMPARE_ALL=0
       shift
       ;;
     --help|-h)
-      sed -n '2,14p' "$0"
+      sed -n '2,16p' "$0"
       exit 0
       ;;
     *)
@@ -77,10 +95,26 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+slug=$(bench_rows_slug "$ROWS")
+if [ "$COMPARE_ALL" = "1" ]; then
+  export BENCH_COMPARE_LATEST="$ROOT/docs/benchmarks/${slug}/latest.md"
+fi
+if [ "$WRITE_SNAPSHOT" = "1" ]; then
+  export BENCH_WRITE_SNAPSHOT="$ROOT/docs/benchmarks/${slug}/serve-hot.md"
+  export BENCH_SNAPSHOT_ROWS="$ROWS"
+  export BENCH_SNAPSHOT_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+fi
+
 if [ "$SKIP_LOAD" = "0" ]; then
   rm -rf "$COLDRUN_DATA"
-  "$COLDRUN_BIN" --data-dir "$COLDRUN_DATA" local --demo "$ROWS" >/dev/null
+  "$COLDRUN_BIN" --data-dir "$COLDRUN_DATA" local --demo "$ROWS" >/dev/null 2>&1
   echo "loaded demo $ROWS rows into hits" >&2
+fi
+
+DATA_BYTES=0
+if [ -d "$COLDRUN_DATA" ]; then
+  DATA_BYTES=$(COLDRUN_DATA="$COLDRUN_DATA" "$BENCH/data-size" 2>/dev/null || echo 0)
+  export BENCH_SNAPSHOT_BYTES="$DATA_BYTES"
 fi
 
 if [ "$COMPARE_LOCAL" = "1" ]; then
@@ -99,9 +133,9 @@ if [ "$COMPARE_LOCAL" = "1" ]; then
   ./stop >/dev/null 2>&1 || true
   cd "$ROOT"
   echo "=== Q1 overhead (fresh CLI vs warm serve, seconds) ===" >&2
-  echo "local (new process): $local_t" >&2
-  echo "serve (warm):        $serve_t" >&2
-  if [ -n "$local_t" ] && [ -n "$serve_t" ] && awk "BEGIN { exit !($local_t > 0) }"; then
+  echo "local (new process): ${local_t:-?}" >&2
+  echo "serve (warm):        ${serve_t:-?}" >&2
+  if [ -n "${local_t:-}" ] && [ -n "${serve_t:-}" ] && awk "BEGIN { exit !($local_t > 0 && $serve_t > 0) }"; then
     awk -v l="$local_t" -v s="$serve_t" 'BEGIN {
       printf "serve is %.1fx faster than local for Q1\n", l / s
     }' >&2

@@ -75,7 +75,7 @@ done
 if [ "$COLDRUN_SKIP_LOAD" = "0" ]; then
   rm -rf "$COLDRUN_DATA"
   if [ -n "$DEMO_ROWS" ]; then
-    "$COLDRUN_BIN" --data-dir "$COLDRUN_DATA" local --demo "$DEMO_ROWS" >/dev/null
+    "$COLDRUN_BIN" --data-dir "$COLDRUN_DATA" local --demo "$DEMO_ROWS" >/dev/null 2>&1
     echo "loaded demo $DEMO_ROWS rows into hits" >&2
   elif [ -n "${HITS_PARQUET:-}" ]; then
     HITS_PARQUET="$HITS_PARQUET" "$BENCH/load"

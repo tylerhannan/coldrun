@@ -11,6 +11,9 @@ set -euo pipefail
 : "${BENCH_QUERY_TO:=999}"
 : "${BENCH_PROGRESS:=0}"
 : "${BENCH_PRINT_HOT_SUMMARY:=0}"
+: "${BENCH_PRINT_TOP_SLOW:=0}"
+: "${BENCH_COMPARE_LATEST:=}"
+: "${BENCH_WRITE_SNAPSHOT:=}"
 
 bench_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -66,6 +69,9 @@ bench_should_run_query() {
   return 0
 }
 
+# shellcheck source=lib/bench-report.sh
+source "$(dirname "${BASH_SOURCE[0]}")/bench-report.sh"
+
 bench_run_query() {
   local query="$1"
   local query_num="$2"
@@ -73,7 +79,7 @@ bench_run_query() {
   local results=()
 
   if [ "$BENCH_PROGRESS" = "1" ]; then
-    echo "Q${query_num}: ${query:0:72}..." >&2
+    echo "Q${query_num}/${BENCH_TOTAL:-?}" >&2
   fi
 
   if [ "$BENCH_RESTARTABLE" = "yes" ]; then
@@ -109,45 +115,70 @@ bench_run_query() {
   done
   out+="],"
   echo "$out"
+  if [ "$BENCH_PROGRESS" = "1" ]; then
+    hot=$(bench_hot_seconds "$query_num" 2>/dev/null || true)
+    [ -n "$hot" ] && echo "  -> hot ${hot}s" >&2
+  fi
+}
+
+bench_count_queries() {
+  local n=0
+  local q
+  while IFS= read -r q || [ -n "$q" ]; do
+    [ -z "$q" ] && continue
+    n=$((n + 1))
+  done < "$BENCH_QUERIES_FILE"
+  echo "$n"
 }
 
 bench_hot_seconds() {
-  # ClickBench hot = min of 2nd and 3rd try (when BENCH_TRIES=3).
-  awk -F, -v n="$1" '
-    $1 == n && $2 >= 2 && $3 != "null" && $3 != "" { print $3 }
-  ' result.csv | sort -n | head -n1
+  bench_hot_for_query "$1"
 }
 
 bench_print_hot_summary() {
-  local query_num hot sum
-  sum=0
+  local query_num hot sum nulls
+  sum=$(bench_hot_sum)
+  nulls=$(bench_count_null_timings)
   echo "=== hot (min of tries 2–3, seconds) ===" >&2
   query_num=0
   while IFS= read -r q || [ -n "$q" ]; do
     [ -z "$q" ] && continue
     query_num=$((query_num + 1))
     bench_should_run_query "$query_num" || continue
-    hot=$(bench_hot_seconds "$query_num")
+    hot=$(bench_hot_for_query "$query_num")
     [ -z "$hot" ] && hot="null"
-    if [ "$hot" != "null" ]; then
-      sum=$(awk -v a="$sum" -v b="$hot" 'BEGIN { printf "%.6f", a + b }')
-    fi
     printf "Q%-3s %s\n" "$query_num" "$hot" >&2
   done < "$BENCH_QUERIES_FILE"
   echo "hot sum: $sum" >&2
+  [ "$nulls" -gt 0 ] && echo "WARNING: $nulls failed timings in result.csv" >&2
+  if [ "$BENCH_PRINT_TOP_SLOW" = "1" ]; then
+    bench_print_top_slow 8
+  fi
+  if [ -n "$BENCH_COMPARE_LATEST" ]; then
+    bench_compare_latest_md "$BENCH_COMPARE_LATEST"
+  fi
+  if [ -n "$BENCH_WRITE_SNAPSHOT" ]; then
+    bench_write_hot_snapshot "$BENCH_WRITE_SNAPSHOT" "${BENCH_SNAPSHOT_ROWS:-?}" \
+      "${BENCH_SNAPSHOT_BYTES:-0}" "${BENCH_SNAPSHOT_COMMIT:-}"
+  fi
 }
 
 bench_main() {
-  local dir query_num q ran
+  local dir query_num q ran total
   dir=$(bench_dir)
   cd "$dir"
   chmod +x ./*.sh ./query ./lib/*.sh 2>/dev/null || true
+
+  total=$(bench_count_queries)
+  export BENCH_TOTAL="$total"
 
   : > result.csv
   echo "num,try,seconds" >> result.csv
 
   query_num=0
   ran=0
+  local start_t
+  start_t=$(date +%s.%N)
   while IFS= read -r q || [ -n "$q" ]; do
     [ -z "$q" ] && continue
     query_num=$((query_num + 1))
@@ -155,8 +186,11 @@ bench_main() {
     bench_run_query "$q" "$query_num"
     ran=$((ran + 1))
   done < "$BENCH_QUERIES_FILE"
+  local end_t wall
+  end_t=$(date +%s.%N)
+  wall=$(awk -v s="$start_t" -v e="$end_t" 'BEGIN { printf "%.2f", e - s }')
 
-  echo "Queries completed: $ran (of $query_num in ${BENCH_QUERIES_FILE})"
+  echo "Queries completed: $ran (of $total in ${BENCH_QUERIES_FILE}), wall ${wall}s"
   if [ "$BENCH_PRINT_HOT_SUMMARY" = "1" ]; then
     bench_print_hot_summary
   fi

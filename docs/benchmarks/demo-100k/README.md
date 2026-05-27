@@ -3,9 +3,12 @@
 **Command:** `./scripts/bench-all.sh 100000`  
 **Queries:** [`clickbench/coldrun/queries.sql`](../../../clickbench/coldrun/queries.sql) (43)
 
-## Latest full run
+## Latest full runs
 
-See [`latest.md`](latest.md) for all 43 query timings (pass 11 era, ~0.15s total).
+| Doc | Command | Protocol |
+|-----|---------|----------|
+| [`latest.md`](latest.md) | `bench-all.sh` | Fresh CLI per query (~0.15s sum) |
+| [`serve-hot.md`](serve-hot.md) | `bench-serve.sh` | Warm serve, hot = min(try 2,3) |
 
 ## Pass changelog (highlights)
 

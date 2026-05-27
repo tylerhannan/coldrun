@@ -7,7 +7,7 @@ ClickBench **Combined** scores need a warm server, three tries per query, and (f
 | Script | Server | Restarts | Tries | Use for |
 |--------|--------|----------|-------|---------|
 | [`bench-all.sh`](../../scripts/bench-all.sh) | No (new CLI each query) | 43× process | 1 | Fast dev regression; **not** ClickBench hot |
-| [`bench-serve.sh`](../../scripts/bench-serve.sh) | Yes (`serve`) | None (warm) | 3 | **Hot-shaped** local timing; subset friendly |
+| [`bench-serve.sh`](../../scripts/bench-serve.sh) | Yes (`serve`) | None (warm) | 3 | **Hot-shaped** timing; auto-compares to `latest.md` |
 | [`bench-clickbench.sh`](../../scripts/bench-clickbench.sh) `--embedded` | Yes | None | 3 | ClickBench output format, warm (quick) |
 | [`bench-clickbench.sh`](../../scripts/bench-clickbench.sh) (default) | Yes | Per query | 3 | Full cold protocol (slow on laptop) |
 
@@ -21,6 +21,7 @@ ClickBench **Combined** scores need a warm server, three tries per query, and (f
 ./scripts/bench-all.sh 100000
 
 # 3) Hot-shaped timing (warm serve, min of tries 2–3)
+./scripts/bench-serve.sh 100000 --write-snapshot   # refresh serve-hot.md
 ./scripts/bench-serve.sh 100000 --from 1 --to 10
 ./scripts/bench-serve.sh 100000 --queries 6,23,40
 
@@ -45,7 +46,8 @@ Logs (gitignored): `logs/benchmarks/serve-last.log`, `clickbench-last.log`.
 | File | Contents |
 |------|----------|
 | `clickbench/coldrun/result.csv` | `num,try,seconds` per run |
-| `docs/benchmarks/demo-100k/latest.md` | Committed `bench-all` snapshot |
+| `docs/benchmarks/demo-100k/latest.md` | Committed `bench-all` snapshot (CLI per query) |
+| `docs/benchmarks/demo-100k/serve-hot.md` | Committed `bench-serve` hot snapshot (warm server) |
 
 ## Cloud / real data
 
