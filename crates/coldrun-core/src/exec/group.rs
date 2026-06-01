@@ -11,12 +11,12 @@ use super::aggregate::AggState;
 use super::filter::build_filter_mask;
 use super::mask_util::{mask_is_sparse, selected_indices};
 use super::group_int::{apply_limit_offset, try_execute_grouped_int};
-use super::topk::truncate_to_top_k;
 use super::QueryResult;
 
 struct GroupBucket {
     states: Vec<AggState>,
     sample_row: usize,
+    first_seen: u32,
 }
 
 pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResult> {
@@ -102,6 +102,7 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
                 .map(|_| AggState::default())
                 .collect(),
             sample_row: i,
+            first_seen: i as u32,
         });
 
         for (state, proj) in bucket.states.iter_mut().zip(parsed.select_items.iter()) {
@@ -118,6 +119,7 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
         .collect();
 
     let mut rows = Vec::new();
+    let mut first_seen = Vec::new();
     for (key, bucket) in groups {
         if let Some(having) = &parsed.having {
             let pass = bucket
@@ -150,11 +152,10 @@ pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResul
             row.push(val);
         }
         rows.push(row);
+        first_seen.push(bucket.first_seen);
     }
 
-    truncate_to_top_k(parsed, &column_names, &mut rows);
-    sort_rows(&parsed, &column_names, &mut rows)?;
-    apply_limit_offset(parsed, &mut rows);
+    finalize_rows(parsed, &column_names, &mut rows, &first_seen)?;
 
     Ok(QueryResult {
         columns: column_names,
@@ -221,19 +222,54 @@ pub(crate) fn sort_rows(
         return Ok(());
     }
 
-    rows.sort_by(|a, b| {
-        for (order_expr, desc) in &parsed.order_by {
-            let col_idx = resolve_order_column(order_expr, columns, &parsed.select_items)
-                .unwrap_or(0);
-            let cmp = compare_cell(&a[col_idx], &b[col_idx]);
-            let ord = if *desc { cmp.reverse() } else { cmp };
-            if ord != std::cmp::Ordering::Equal {
-                return ord;
-            }
-        }
-        std::cmp::Ordering::Equal
-    });
+    rows.sort_by(|a, b| row_cmp(parsed, columns, a, b, 0, 0));
     Ok(())
+}
+
+/// Sort (and LIMIT/OFFSET) grouped rows; ties break by first table row seen (DuckDB threads=1).
+pub(crate) fn finalize_rows(
+    parsed: &ParsedQuery,
+    columns: &[String],
+    rows: &mut Vec<Vec<String>>,
+    first_seen: &[u32],
+) -> Result<()> {
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        row_cmp(
+            parsed,
+            columns,
+            &rows[a],
+            &rows[b],
+            first_seen[a],
+            first_seen[b],
+        )
+    });
+    let sorted: Vec<_> = order.into_iter().map(|i| rows[i].clone()).collect();
+    *rows = sorted;
+    apply_limit_offset(parsed, rows);
+    Ok(())
+}
+
+fn row_cmp(
+    parsed: &ParsedQuery,
+    columns: &[String],
+    a: &[String],
+    b: &[String],
+    fs_a: u32,
+    fs_b: u32,
+) -> std::cmp::Ordering {
+    if parsed.order_by.is_empty() {
+        return fs_a.cmp(&fs_b);
+    }
+    for (order_expr, desc) in &parsed.order_by {
+        let col_idx = resolve_order_column(order_expr, columns, &parsed.select_items).unwrap_or(0);
+        let cmp = compare_cell(&a[col_idx], &b[col_idx]);
+        let ord = if *desc { cmp.reverse() } else { cmp };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    fs_a.cmp(&fs_b)
 }
 
 fn resolve_order_column(

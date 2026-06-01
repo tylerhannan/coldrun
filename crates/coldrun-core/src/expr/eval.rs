@@ -346,8 +346,8 @@ fn eval_function_i64(table: &Table, f: &Function, row: usize) -> Result<i64> {
     match name.as_str() {
         "LENGTH" => {
             let arg = extract_expr(f, 0)?;
-            // DuckDB/ClickHouse LENGTH on strings is byte length.
-            Ok(eval_string(table, &arg, row)?.as_bytes().len() as i64)
+            // DuckDB LENGTH counts Unicode code points, not UTF-8 bytes.
+            Ok(eval_string(table, &arg, row)?.chars().count() as i64)
         }
         "DATE_TRUNC" => {
             let unit = extract_ident(f, 0)?;

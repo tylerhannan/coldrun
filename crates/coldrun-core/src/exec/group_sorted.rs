@@ -8,7 +8,7 @@ use crate::Result;
 
 use super::filter::build_filter_mask;
 use super::group::resolve_group_expr;
-use super::group_fused::finish_count_sorted;
+use super::group_fused::finish_count_sorted_legacy;
 use super::having::having_can_match;
 use super::mask_util::for_each_selected;
 use super::QueryResult;
@@ -60,7 +60,7 @@ fn try_monotonic_int64_count(
     let out = (start..end)
         .rev()
         .map(|i| (1u64, vec![data[i].to_string(), "1".to_string()]));
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }
 
 /// Sort selected keys + run-length COUNT for a single int column (medium cardinality).
@@ -102,11 +102,11 @@ fn try_sort_rle_int_count(
         _ => return Ok(None),
     }
     if keys.is_empty() {
-        return finish_count_sorted(parsed, std::iter::empty());
+        return finish_count_sorted_legacy(parsed, std::iter::empty());
     }
     keys.sort_unstable();
     let out = rle_counts(&keys).map(|(k, c)| (c, vec![k.to_string(), c.to_string()]));
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }
 
 fn rle_counts(sorted: &[i64]) -> impl Iterator<Item = (i64, u64)> + '_ {

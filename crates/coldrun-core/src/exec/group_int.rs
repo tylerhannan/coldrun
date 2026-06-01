@@ -13,10 +13,9 @@ use super::aggregate::AggState;
 use super::filter::build_filter_mask;
 use super::mask_util::{mask_is_sparse, selected_indices};
 use super::group::{
-    eval_proj_at_row, is_aggregate, is_group_key_proj, resolve_group_expr, sort_rows,
+    eval_proj_at_row, finalize_rows, is_aggregate, is_group_key_proj, resolve_group_expr,
 };
 use super::having::having_can_match;
-use super::topk::truncate_to_top_k;
 use super::QueryResult;
 
 const MAX_PACKED_KEYS: usize = 4;
@@ -66,6 +65,7 @@ pub fn try_execute_grouped_int(
                 .collect(),
             sample_row: i,
             key,
+            first_seen: i as u32,
         });
 
         for (state, proj) in bucket.states.iter_mut().zip(parsed.select_items.iter()) {
@@ -82,6 +82,7 @@ struct GroupBucket {
     states: Vec<AggState>,
     sample_row: usize,
     key: u128,
+    first_seen: u32,
 }
 
 fn plan_int_group(table: &Table, parsed: &ParsedQuery) -> Result<Option<IntGroupSpec>> {
@@ -249,6 +250,7 @@ fn finish_groups(
         .collect();
 
     let mut rows = Vec::new();
+    let mut first_seen = Vec::new();
     for (_packed, bucket) in groups {
         if let Some(having) = &parsed.having {
             let pass = bucket
@@ -284,11 +286,10 @@ fn finish_groups(
             row.push(val);
         }
         rows.push(row);
+        first_seen.push(bucket.first_seen);
     }
 
-    truncate_to_top_k(parsed, &column_names, &mut rows);
-    sort_rows(parsed, &column_names, &mut rows)?;
-    apply_limit_offset(parsed, &mut rows);
+    finalize_rows(parsed, &column_names, &mut rows, &first_seen)?;
 
     Ok(Some(QueryResult {
         columns: column_names,

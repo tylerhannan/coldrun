@@ -9,7 +9,7 @@ use crate::storage::{ColumnData, ColumnType, Table};
 use crate::Result;
 
 use super::group::resolve_group_expr;
-use super::group_fused::{build_mask, finish_count_sorted};
+use super::group_fused::{build_mask, finish_count_sorted_legacy};
 use super::mask_util::for_each_selected;
 use super::utf8_arena::Utf8Intern;
 use super::QueryResult;
@@ -72,5 +72,5 @@ pub fn try_fused_utf8_one_distinct(
         let u = set.len() as u64;
         (u, vec![intern.get(kid).to_string(), u.to_string()])
     });
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }

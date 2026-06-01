@@ -36,3 +36,19 @@ pub fn top_counts<T: Clone>(items: impl Iterator<Item = (u64, T)>, limit: usize,
     pairs.sort_by(|a, b| b.0.cmp(&a.0));
     pairs.into_iter().skip(offset).take(limit).map(|(_, t)| t).collect()
 }
+
+/// Collect `(count, row)` in scan order, then unstable sort by count desc (ties keep scan order).
+pub fn top_counts_scan_order<T: Clone>(
+    items: impl Iterator<Item = (u64, T)>,
+    limit: usize,
+    offset: usize,
+) -> Vec<T> {
+    let mut pairs: Vec<(u64, T)> = items.collect();
+    pairs.sort_by(|a, b| b.0.cmp(&a.0));
+    pairs
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(_, t)| t)
+        .collect()
+}

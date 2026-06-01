@@ -10,7 +10,7 @@ use crate::sql::{expr_column_name, projection_label, ParsedQuery, SelectItemKind
 use crate::storage::{ColumnData, ColumnType, Table};
 use crate::Result;
 
-use super::agg_heap::top_counts;
+use super::agg_heap::top_counts_scan_order;
 use super::filter::build_filter_mask;
 use super::group::resolve_group_expr;
 use super::having::having_can_match;
@@ -97,23 +97,7 @@ struct PairAgg {
     sum_b: i64,
     sum_w: i64,
     n_w: u64,
-}
-
-impl super::agg_topk::TopKCount for PairAgg {
-    fn topk_count(&self) -> u64 {
-        self.count
-    }
-}
-
-#[derive(Default)]
-struct CountOnly {
-    count: u64,
-}
-
-impl super::agg_topk::TopKCount for CountOnly {
-    fn topk_count(&self) -> u64 {
-        self.count
-    }
+    first_seen: u32,
 }
 
 /// Q10: RegionID + SUM + COUNT + AVG + COUNT DISTINCT UserID.
@@ -201,7 +185,7 @@ fn try_fused_region_aggs(
             ],
         )
     });
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }
 
 /// Q31–33: two int keys + COUNT + SUM(col) + AVG(col).
@@ -242,38 +226,8 @@ fn try_fused_int_pair_aggs(
         return Ok(empty_result(parsed));
     };
 
-    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
-    let offset = parsed.offset.unwrap_or(0) as usize;
-
-    if limit < usize::MAX && !table.demo_near_unique() {
-        let mut topk = super::agg_topk::StreamingAggTopK::<u128, PairAgg>::new(limit, offset);
-        for_each_selected(&mask, row_count, |i| {
-            let key = super::column_slice::pack_pair(ic1, ic2, i);
-            topk.update(key, |b| {
-                b.count += 1;
-                if let (Some(ss), Some(as_)) = (sum_slice, avg_slice) {
-                    b.sum_b += super::column_slice::int_at(ss, i);
-                    b.sum_w += super::column_slice::int_at(as_, i);
-                    b.n_w += 1;
-                }
-            });
-        });
-        let rows = topk.into_map().into_iter().map(|(key, b)| {
-            let (a, bb) = unpack_pair_keys(c1, c2, key);
-            let avg = b.sum_w as f64 / b.n_w.max(1) as f64;
-            (
-                b.count,
-                vec![
-                    a,
-                    bb,
-                    b.count.to_string(),
-                    b.sum_b.to_string(),
-                    format!("{avg}"),
-                ],
-            )
-        });
-        return finish_count_sorted(parsed, rows);
-    }
+    let _limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let _offset = parsed.offset.unwrap_or(0) as usize;
 
     const SHARDS: usize = 256;
     let mut shards: [AHashMap<u128, PairAgg>; SHARDS] =
@@ -282,7 +236,10 @@ fn try_fused_int_pair_aggs(
     for_each_selected(&mask, row_count, |i| {
         let key = super::column_slice::pack_pair(ic1, ic2, i);
         let shard = (key as usize) % SHARDS;
-        let b = shards[shard].entry(key).or_default();
+        let b = shards[shard].entry(key).or_insert_with(|| PairAgg {
+            first_seen: i as u32,
+            ..Default::default()
+        });
         b.count += 1;
         if let (Some(ss), Some(as_)) = (sum_slice, avg_slice) {
             b.sum_b += super::column_slice::int_at(ss, i);
@@ -291,23 +248,25 @@ fn try_fused_int_pair_aggs(
         }
     });
 
-    let rows = shards.into_iter().flat_map(|groups| {
-        groups.into_iter().map(|(key, b)| {
+    let mut rows = Vec::new();
+    let mut first_seen = Vec::new();
+    for groups in shards {
+        for (key, b) in groups {
             let (a, bb) = unpack_pair_keys(c1, c2, key);
             let avg = b.sum_w as f64 / b.n_w.max(1) as f64;
-            (
-                b.count,
-                vec![
-                    a,
-                    bb,
-                    b.count.to_string(),
-                    b.sum_b.to_string(),
-                    format!("{avg}"),
-                ],
-            )
-        })
-    });
-    finish_count_sorted(parsed, rows)
+            rows.push(vec![
+                a,
+                bb,
+                b.count.to_string(),
+                b.sum_b.to_string(),
+                format!("{avg}"),
+            ]);
+            first_seen.push(b.first_seen);
+        }
+    }
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+    super::group::finalize_rows(parsed, &columns, &mut rows, &first_seen)?;
+    Ok(Some(QueryResult { columns, rows }))
 }
 
 fn only_pair_aggs(parsed: &ParsedQuery) -> bool {
@@ -410,7 +369,7 @@ fn try_fused_utf8_count(
         .into_rows()
         .into_iter()
         .map(|(c, k)| (c, vec![k, c.to_string()]));
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }
 
 fn utf8_group_col(parsed: &ParsedQuery, table: &Table) -> Option<String> {
@@ -468,41 +427,44 @@ fn try_fused_int_utf8_count(
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let offset = parsed.offset.unwrap_or(0) as usize;
 
-    if limit < usize::MAX && !table.demo_near_unique() {
-        let mut intern = super::utf8_arena::Utf8Intern::with_capacity(512);
-        let mut topk =
-            super::agg_topk::StreamingAggTopK::<(i64, u32), CountOnly>::new(limit, offset);
-        for_each_selected(&mask, row_count, |i| {
-            if let Ok(ik) = i64_at(ic, i) {
-                let uid = intern.intern(&udata[i]);
-                topk.update((ik, uid), |b| b.count += 1);
-            }
-        });
-        let out = topk.into_map().into_iter().map(|((ik, uid), b)| {
-            (
-                b.count,
-                vec![ik.to_string(), intern.get(uid).to_string(), b.count.to_string()],
-            )
-        });
-        return finish_count_sorted(parsed, out);
-    }
-
-    let mut groups: AHashMap<(i64, u64), (String, u64)> = AHashMap::with_capacity(mask.len() / 4 + 1);
+    let mut groups: AHashMap<(i64, u64), (String, u64, u32)> =
+        AHashMap::with_capacity(mask.len() / 4 + 1);
     for_each_selected(&mask, row_count, |i| {
         if let Ok(ik) = i64_at(ic, i) {
             let s = &udata[i];
             let key = (ik, hash_str(s));
-            let e = groups.entry(key).or_insert_with(|| (s.to_string(), 0));
+            let e = groups.entry(key).or_insert_with(|| (s.to_string(), 0, i as u32));
             if e.0.as_str() == s {
                 e.1 += 1;
             }
         }
     });
 
-    let out = groups
+    let pairs: Vec<(u64, u32, Vec<String>)> = groups
         .into_iter()
-        .map(|((ik, _), (s, c))| (c, vec![ik.to_string(), s, c.to_string()]));
-    finish_count_sorted(parsed, out)
+        .map(|((ik, _), (s, c, fs))| (c, fs, vec![ik.to_string(), s, c.to_string()]))
+        .collect();
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+    if parsed.order_by.is_empty() {
+        let mut sorted: Vec<(u32, Vec<String>)> =
+            pairs.into_iter().map(|(_, fs, row)| (fs, row)).collect();
+        sorted.sort_by_key(|(fs, _)| *fs);
+        let rows: Vec<Vec<String>> = sorted
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(_, r)| r)
+            .collect();
+        return Ok(Some(QueryResult { columns, rows }));
+    }
+    let mut first_seen = Vec::with_capacity(pairs.len());
+    let mut rows = Vec::with_capacity(pairs.len());
+    for (_, fs, row) in pairs {
+        first_seen.push(fs);
+        rows.push(row);
+    }
+    super::group::finalize_rows(parsed, &columns, &mut rows, &first_seen)?;
+    Ok(Some(QueryResult { columns, rows }))
 }
 
 fn split_int_utf8_keys(table: &Table, parsed: &ParsedQuery) -> Result<Option<(String, String)>> {
@@ -621,7 +583,7 @@ fn try_fused_q19(
             ],
         )
     });
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }
 
 /// Q28: CounterID + AVG(length(URL)) + COUNT(*) with HAVING COUNT(*) > N.
@@ -680,41 +642,44 @@ fn try_fused_counter_avg_url_len(
     match counter {
         ColumnData::Int32(cols) => {
             for_each_selected(&mask, row_count, |i| {
-                let b = groups.entry(cols[i]).or_default();
-                b.sum_len += urls[i].as_bytes().len() as u128;
+                let b = groups.entry(cols[i]).or_insert_with(Bucket::default);
+                b.sum_len += urls[i].chars().count() as u128;
                 b.count += 1;
             });
         }
         ColumnData::Int16(cols) => {
             for_each_selected(&mask, row_count, |i| {
-                let b = groups.entry(i32::from(cols[i])).or_default();
-                b.sum_len += urls[i].as_bytes().len() as u128;
+                let b = groups.entry(i32::from(cols[i])).or_insert_with(Bucket::default);
+                b.sum_len += urls[i].chars().count() as u128;
                 b.count += 1;
             });
         }
         _ => return Ok(None),
     }
 
-    let mut scored: Vec<(f64, Vec<String>)> = groups
+    let mut scored: Vec<(f64, String, Vec<String>)> = groups
         .into_iter()
         .filter(|(_, b)| b.count > threshold)
         .map(|(cid, b)| {
             let avg = b.sum_len as f64 / b.count as f64;
-            (
-                avg,
-                vec![cid.to_string(), format!("{avg}"), b.count.to_string()],
-            )
+            let row = vec![cid.to_string(), format!("{avg}"), b.count.to_string()];
+            let tie = cid.to_string();
+            (avg, tie, row)
         })
         .collect();
 
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let offset = parsed.offset.unwrap_or(0) as usize;
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
     let rows: Vec<Vec<String>> = scored
         .into_iter()
         .skip(offset)
         .take(limit)
-        .map(|(_, r)| r)
+        .map(|(_, _, r)| r)
         .collect();
 
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
@@ -843,7 +808,7 @@ fn try_fused_utf8_count_distinct_i64(
         let u = set.len() as u64;
         (u, vec![k, u.to_string()])
     });
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }
 
 fn q19_group_keys(_table: &Table, parsed: &ParsedQuery) -> bool {
@@ -937,7 +902,7 @@ fn try_fused_int4_count(
             ],
         )
     });
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }
 
 fn is_int_group_expr(table: &Table, expr: &Expr) -> bool {
@@ -1025,7 +990,7 @@ fn try_fused_int64_count(
     let out = groups
         .into_iter()
         .map(|(k, c)| (c, vec![k.to_string(), c.to_string()]));
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }
 
 /// Q12: int16 + utf8 keys + COUNT(DISTINCT UserID).
@@ -1089,7 +1054,7 @@ fn try_fused_int16_utf8_distinct(
             ],
         )
     });
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }
 
 fn split_int16_utf8_keys(table: &Table, parsed: &ParsedQuery) -> Result<Option<(String, String)>> {
@@ -1180,7 +1145,7 @@ fn try_fused_utf8_pair_distinct(
         let u = set.len() as u64;
         (u, vec![a, b, u.to_string()])
     });
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }
 
 fn group_id_name(expr: &Expr, parsed: &ParsedQuery) -> Result<String> {
@@ -1198,13 +1163,20 @@ fn empty_result(parsed: &ParsedQuery) -> Option<QueryResult> {
     })
 }
 
-pub(crate) fn finish_count_sorted(
+pub(crate) fn finish_count_sorted_scan(
     parsed: &ParsedQuery,
     scored: impl Iterator<Item = (u64, Vec<String>)>,
 ) -> Result<Option<QueryResult>> {
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let offset = parsed.offset.unwrap_or(0) as usize;
-    let rows = top_counts(scored, limit, offset);
+    let rows = top_counts_scan_order(scored, limit, offset);
     Ok(Some(QueryResult { columns, rows }))
+}
+
+pub(crate) fn finish_count_sorted_legacy(
+    parsed: &ParsedQuery,
+    scored: impl Iterator<Item = (u64, Vec<String>)>,
+) -> Result<Option<QueryResult>> {
+    finish_count_sorted_scan(parsed, scored)
 }

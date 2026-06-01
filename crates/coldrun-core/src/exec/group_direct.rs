@@ -10,7 +10,7 @@ use crate::Result;
 
 use super::filter::build_filter_mask;
 use super::group::resolve_group_expr;
-use super::group_fused::finish_count_sorted;
+use super::group_fused::finish_count_sorted_legacy;
 use super::having::having_can_match;
 use super::mask_util::for_each_selected;
 use super::QueryResult;
@@ -76,7 +76,7 @@ fn try_adv_engineid_group(
     let out = counts
         .into_iter()
         .map(|(k, c)| (c, vec![k.to_string(), c.to_string()]));
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }
 
 /// Q9: RegionID (~1000 buckets) + COUNT(DISTINCT UserID).
@@ -140,7 +140,7 @@ fn try_regionid_count_distinct(
             let u = set.len() as u64;
             (u, vec![r.to_string(), u.to_string()])
         });
-    finish_count_sorted(parsed, out)
+    finish_count_sorted_legacy(parsed, out)
 }
 
 /// Q10: RegionID + SUM(AdvEngineID) + COUNT + AVG(ResolutionWidth) + COUNT DISTINCT UserID.
