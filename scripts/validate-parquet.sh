@@ -1,5 +1,5 @@
 #!/bin/bash
-# Compare coldrun vs DuckDB on the same Parquet file (no cloud).
+# Compare coldrun vs ClickHouse on the same Parquet file (no cloud).
 #
 # Usage:
 #   ./scripts/validate-parquet.sh hits-1m.parquet
@@ -7,16 +7,19 @@
 #   ./scripts/validate-parquet.sh hits.parquet --queries 1,2,3,5
 #   ./scripts/validate-parquet.sh hits.parquet --skip-load   # reuse COLDRUN_DATA
 #
-# Requires: duckdb CLI, coldrun built, Parquet on disk (use sample-parquet.sh to shrink).
+# Requires: ClickHouse in clickhouse-local/ (./scripts/install-clickhouse-local.sh), coldrun built.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+# shellcheck source=scripts/lib/clickhouse-local.sh
+. "$ROOT/scripts/lib/clickhouse-local.sh"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
 BIN="$ROOT/target/release/coldrun"
+CH="$(clickhouse_local_bin "$ROOT" || true)"
 DIFF="${DIFF:-/usr/bin/diff}"
 [ -x "$DIFF" ] || DIFF="diff"
 QUERIES="$ROOT/clickbench/coldrun/queries.sql"
@@ -54,8 +57,8 @@ done
 }
 [ -f "$PARQUET" ] || { echo "missing parquet: $PARQUET" >&2; exit 1; }
 
-if ! command -v duckdb >/dev/null 2>&1; then
-  echo "duckdb CLI required (brew install duckdb)" >&2
+if [ -z "$CH" ] || [ ! -x "$CH" ]; then
+  echo "ClickHouse binary required — run: ./scripts/install-clickhouse-local.sh" >&2
   exit 1
 fi
 
@@ -84,26 +87,6 @@ coldrun_out() {
   rm -f "$errf"
 }
 
-duckdb_hits_view_sql() {
-  cat <<SQL
-CREATE OR REPLACE TEMP VIEW hits AS
-SELECT * REPLACE (
-  date_add(DATE '1970-01-01', CAST(EventDate AS INTEGER)) AS EventDate,
-  to_timestamp(CAST(EventTime AS BIGINT)) AS EventTime
-)
-FROM read_parquet('$PARQUET');
-SQL
-}
-
-duckdb_out() {
-  local q="$1"
-  duckdb -batch -csv -noheader 2>/dev/null <<SQL
-PRAGMA threads=1;
-$(duckdb_hits_view_sql)
-$q
-SQL
-}
-
 normalize_result() {
   # Drop header rows; normalize numbers (incl. scientific) and separators for diff.
   python3 -c '
@@ -127,9 +110,8 @@ def norm_ts(s):
         tz_off = sign * (int(off_h[1:]) * 60 + int(off_m or 0))
         utc = naive - timedelta(minutes=tz_off)
     else:
-        # coldrun DATE_TRUNC labels are PDT wall time (UTC-7)
-        utc = naive + timedelta(hours=7)
-    return str(int(utc.replace(tzinfo=timezone.utc).timestamp()) // 60)
+        utc = naive.replace(tzinfo=timezone.utc)
+    return str(int(utc.timestamp()) // 60)
 
 for line in sys.stdin:
     line = line.strip()
@@ -179,6 +161,7 @@ SKIP=0
 LOG="${VALIDATE_LOG:-$ROOT/logs/benchmarks/validate-$slug.log}"
 mkdir -p "$(dirname "$LOG")"
 : >"$LOG"
+echo "reference: $CH ($("$CH" --version 2>/dev/null | head -1))" >>"$LOG"
 
 validate_sql() {
   python3 -c '
@@ -188,6 +171,14 @@ q = sys.argv[2]
 u = q.upper()
 if n == 18 and "ORDER BY" not in u:
     q = q.replace("LIMIT", "ORDER BY UserID, SearchPhrase LIMIT", 1)
+elif n == 19:
+    q = q.replace(
+        "ORDER BY COUNT(*) DESC",
+        "ORDER BY COUNT(*) DESC, UserID, m, SearchPhrase",
+        1,
+    )
+elif n == 29:
+    q = q.replace("ORDER BY l DESC", "ORDER BY l DESC, k, MIN(Referer)", 1)
 elif n == 31:
     q = q.replace("ORDER BY c DESC", "ORDER BY c DESC, SearchEngineID, ClientIP", 1)
 elif n in (32, 33):
@@ -207,37 +198,39 @@ while IFS= read -r q || [ -n "$q" ]; do
   fi
 
   vq=$(validate_sql "$i" "$q")
+  chq=$(clickhouse_reference_sql "$i" "$vq")
 
   crf=$(mktemp)
-  dkf=$(mktemp)
+  ref=$(mktemp)
   if ! coldrun_out "$vq" >"$crf" 2>>"$LOG"; then
     echo "FAIL Q$i coldrun error" | tee -a "$LOG"
     FAIL=$((FAIL + 1))
     i=$((i + 1))
-    rm -f "$crf" "$dkf"
+    rm -f "$crf" "$ref"
     continue
   fi
-  if ! duckdb_out "$vq" >"$dkf" 2>>"$LOG"; then
-    echo "SKIP Q$i duckdb error (unsupported SQL?)" | tee -a "$LOG"
+  if ! clickhouse_out "$CH" "$PARQUET" "$chq" >"$ref" 2>>"$LOG"; then
+    echo "SKIP Q$i clickhouse error (unsupported SQL?)" | tee -a "$LOG"
     SKIP=$((SKIP + 1))
     i=$((i + 1))
-    rm -f "$crf" "$dkf"
+    rm -f "$crf" "$ref"
     continue
   fi
 
-  if "$DIFF" -q <(normalize_result <"$crf") <(normalize_result <"$dkf") >/dev/null 2>&1; then
+  if "$DIFF" -q <(normalize_result <"$crf") <(normalize_result <"$ref") >/dev/null 2>&1; then
     echo "PASS Q$i" | tee -a "$LOG"
     PASS=$((PASS + 1))
   else
     echo "FAIL Q$i result mismatch" | tee -a "$LOG"
     echo "  query: $vq" >>"$LOG"
+    echo "  clickhouse: $chq" >>"$LOG"
     echo "  --- coldrun (first 5 lines) ---" >>"$LOG"
     head -5 "$crf" >>"$LOG"
-    echo "  --- duckdb (first 5 lines) ---" >>"$LOG"
-    head -5 "$dkf" >>"$LOG"
+    echo "  --- clickhouse (first 5 lines) ---" >>"$LOG"
+    head -5 "$ref" >>"$LOG"
     FAIL=$((FAIL + 1))
   fi
-  rm -f "$crf" "$dkf"
+  rm -f "$crf" "$ref"
   i=$((i + 1))
 done <"$QUERIES"
 

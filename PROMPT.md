@@ -105,7 +105,7 @@ Full scans, filtered scans, index lookups, `GROUP BY`, `ORDER BY`, string aggreg
 
 ## Acceptance tests (definition of done)
 
-- [ ] All 43 queries return correct results (validate against ClickHouse or DuckDB reference on sample + full checksum on aggregates).
+- [ ] All 43 queries return correct results (validate against ClickHouse on Parquet sample + full checksum on aggregates).
 - [ ] `benchmark.sh` completes unattended on clean Ubuntu 24.04 VM.
 - [ ] Combined score beats current leader on `c6a.4xlarge` (publish numbers in README, or document gap if toy scope stops earlier).
 - [ ] Load time and data size reported honestly (indexes included).

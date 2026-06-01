@@ -94,7 +94,7 @@ pub fn try_execute_global(
             if let Some(name) = expr_column_name(expr) {
                 if let Ok((sum, n)) = sum_column_masked_with_count(table, &name, &mask) {
                     if n > 0 {
-                        let avg = sum as f64 / n as f64;
+                        let avg = sum / n as f64;
                         return Ok(Some(QueryResult {
                             columns: vec![col_name],
                             rows: vec![vec![format!("{avg}")]],
@@ -193,7 +193,7 @@ fn try_execute_global_multi(
             SimpleAgg::Sum(name) => sum_column_masked(table, name, &mask)?.to_string(),
             SimpleAgg::Avg(name) => {
                 let (sum, n) = sum_column_masked_with_count(table, name, &mask)?;
-                let avg = sum as f64 / n.max(1) as f64;
+                let avg = sum / n.max(1) as f64;
                 format!("{avg}")
             }
             SimpleAgg::CountDistinct(name) => count_distinct_col_masked(table, name, &mask, row_count)
@@ -439,18 +439,18 @@ fn count_distinct_col_masked(
 
 fn sum_column_masked(table: &Table, name: &str, mask: &[bool]) -> Result<i128> {
     let (sum, _) = sum_column_masked_with_count(table, name, mask)?;
-    Ok(sum)
+    Ok(sum.round() as i128)
 }
 
-fn sum_column_masked_with_count(table: &Table, name: &str, mask: &[bool]) -> Result<(i128, u64)> {
+fn sum_column_masked_with_count(table: &Table, name: &str, mask: &[bool]) -> Result<(f64, u64)> {
     let col = table.column(name)?;
-    let mut sum = 0i128;
+    let mut sum = 0.0f64;
     let mut n = 0u64;
     match col {
         ColumnData::Int64(v) => {
             for (i, &x) in v.iter().enumerate() {
                 if mask.get(i).copied().unwrap_or(false) {
-                    sum += x as i128;
+                    sum += x as f64;
                     n += 1;
                 }
             }
@@ -458,7 +458,7 @@ fn sum_column_masked_with_count(table: &Table, name: &str, mask: &[bool]) -> Res
         ColumnData::Int32(v) => {
             for (i, &x) in v.iter().enumerate() {
                 if mask.get(i).copied().unwrap_or(false) {
-                    sum += i64::from(x) as i128;
+                    sum += f64::from(x);
                     n += 1;
                 }
             }
@@ -466,7 +466,7 @@ fn sum_column_masked_with_count(table: &Table, name: &str, mask: &[bool]) -> Res
         ColumnData::Int16(v) => {
             for (i, &x) in v.iter().enumerate() {
                 if mask.get(i).copied().unwrap_or(false) {
-                    sum += i64::from(x) as i128;
+                    sum += f64::from(x);
                     n += 1;
                 }
             }

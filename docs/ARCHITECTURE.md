@@ -107,7 +107,7 @@ Per query: stop server → wait until down → `drop_caches` → start → run t
 ## Iteration roadmap
 
 1. **MVP (current):** ingest Parquet → column files; correct results for Q1–Q5 via `coldrun local`.
-2. **Coverage:** all 43 queries correct (validate vs DuckDB/ClickHouse).
+2. **Coverage:** all 43 queries correct (validate vs ClickHouse on Parquet).
 3. **Perf:** PK zones, column pruning, faster aggregations, compression.
 4. **ClickBench PR:** automated `benchmark.sh`, `results/c6a.4xlarge.json`.
 

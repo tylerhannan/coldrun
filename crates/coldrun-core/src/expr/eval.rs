@@ -32,15 +32,14 @@ pub fn format_timestamp_micros(micros: i64) -> String {
         .unwrap_or_else(|| micros.to_string())
 }
 
-/// ClickBench / DuckDB display for `DATE_TRUNC` buckets (PDT, UTC−7).
+/// ClickBench / ClickHouse display for `DATE_TRUNC` buckets.
 /// Minute of hour (0–59) from EventTime micros — matches `extract(minute FROM EventTime)`.
 pub fn event_time_minute_of_hour(micros: i64) -> i64 {
     ((micros / 1_000_000) / 60) % 60
 }
 
 pub fn format_timestamp_micros_trunc(micros: i64) -> String {
-    const PDT_MICROS: i64 = 7 * 3600 * 1_000_000;
-    format_timestamp_micros(micros - PDT_MICROS)
+    format_timestamp_micros(micros)
 }
 
 pub fn eval_i64(table: &Table, expr: &Expr, row: usize) -> Result<i64> {
@@ -353,8 +352,8 @@ fn eval_function_i64(table: &Table, f: &Function, row: usize) -> Result<i64> {
     match name.as_str() {
         "LENGTH" => {
             let arg = extract_expr(f, 0)?;
-            // DuckDB LENGTH counts Unicode code points, not UTF-8 bytes.
-            Ok(eval_string(table, &arg, row)?.chars().count() as i64)
+            // ClickHouse `length()` on String counts UTF-8 bytes.
+            Ok(eval_string(table, &arg, row)?.len() as i64)
         }
         "DATE_TRUNC" => {
             let unit = extract_ident(f, 0)?;

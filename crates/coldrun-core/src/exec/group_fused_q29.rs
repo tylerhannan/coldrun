@@ -54,7 +54,7 @@ pub fn try_fused_q29(
         let hid = intern.intern(host);
         let b = groups.entry(hid).or_default();
         b.count += 1;
-        b.sum_len += s.chars().count() as u128;
+        b.sum_len += s.len() as u128;
         match &b.min_referer {
             Some(cur) if s >= cur.as_str() => {}
             _ => b.min_referer = Some(referer[i].clone()),

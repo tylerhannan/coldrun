@@ -1,18 +1,23 @@
 #!/bin/bash
-# Slice the first N rows of hits.parquet to a smaller file (needs DuckDB CLI).
+# Slice the first N rows of hits.parquet to a smaller file (ClickHouse local).
 #
 # Usage:
 #   ./scripts/sample-parquet.sh hits.parquet 1000000 hits-1m.parquet
 #   ./scripts/sample-parquet.sh hits.parquet 100000   # writes hits-100k.parquet
+#   ./scripts/sample-parquet.sh https://datasets.clickhouse.com/.../hits.parquet 1000000 hits-1m.parquet
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/lib/clickhouse-local.sh
+. "$ROOT/scripts/lib/clickhouse-local.sh"
+
 SRC="${1:?source parquet path or https URL}"
 ROWS="${2:?row count}"
 OUT="${3:-}"
 
-if ! command -v duckdb >/dev/null 2>&1; then
-  echo "duckdb CLI required (brew install duckdb)" >&2
+CH="$(clickhouse_local_bin "$ROOT" || true)"
+if [ -z "$CH" ] || [ ! -x "$CH" ]; then
+  echo "ClickHouse binary required — run: ./scripts/install-clickhouse-local.sh" >&2
   exit 1
 fi
 
@@ -31,11 +36,12 @@ else
   PARQUET_SRC="$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")"
 fi
 
-echo "sampling $ROWS rows from $SRC -> $OUT" >&2
-duckdb -batch <<SQL
-COPY (
-  SELECT * FROM read_parquet('$PARQUET_SRC') LIMIT $ROWS
-) TO '$OUT' (FORMAT PARQUET, COMPRESSION ZSTD);
-SQL
+OUT="$(cd "$(dirname "$OUT")" 2>/dev/null && pwd)/$(basename "$OUT")" || OUT="$(pwd)/$(basename "$OUT")"
 
-du -sh "$OUT" | awk '{print "wrote", $2, "->", "'"$OUT"'"}' >&2
+echo "sampling $ROWS rows from $SRC -> $OUT" >&2
+"$CH" local --query "
+INSERT INTO FUNCTION file('$OUT', Parquet)
+SELECT * FROM file('$PARQUET_SRC', Parquet) LIMIT $ROWS
+"
+
+du -sh "$OUT" | awk '{print "wrote", $1, "->", "'"$OUT"'"}' >&2

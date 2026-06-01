@@ -12,6 +12,7 @@ logs/
 bench-regression-*.log
 hits.parquet
 *.parquet
-data/
+clickhouse-local/clickhouse
+clickhouse-local/VERSION
 result.csv
 .DS_Store

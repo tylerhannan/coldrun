@@ -59,7 +59,7 @@ If you have `hits.parquet` (or a slice) on disk:
 | Correctness | [`validate-parquet.sh`](../../scripts/validate-parquet.sh) `hits-1m.parquet` |
 | Validate + bench | [`measure-parquet.sh`](../../scripts/measure-parquet.sh) `hits-1m.parquet` |
 
-Requires **DuckDB CLI** (`brew install duckdb`). Details: [`parquet/README.md`](parquet/README.md).
+Requires **ClickHouse** in [`clickhouse-local/`](../../clickhouse-local/) (`./scripts/install-clickhouse-local.sh`). Details: [`parquet/README.md`](parquet/README.md).
 
 ## Cloud (when available)
 

@@ -7,7 +7,7 @@
 #   ./scripts/measure-parquet.sh hits-1m.parquet --validate-only
 #   ./scripts/measure-parquet.sh hits-1m.parquet --bench-only --skip-validate
 #
-# Needs: duckdb (for sample + validate), coldrun built, Parquet on disk.
+# Needs: ClickHouse in clickhouse-local/, coldrun built, Parquet on disk.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -68,7 +68,7 @@ export COLDRUN_DATA="${COLDRUN_DATA:-$ROOT/.coldrun-measure-$slug}"
 export COLDRUN_BENCH_LOG="$ROOT/logs/benchmarks/measure-$slug.log"
 
 if [ "$BENCH_ONLY" = "0" ] && [ "$SKIP_VALIDATE" = "0" ]; then
-  echo "=== validate coldrun vs DuckDB ===" >&2
+  echo "=== validate coldrun vs ClickHouse ===" >&2
   "$ROOT/scripts/validate-parquet.sh" "$WORK" --from "$QUERY_FROM" --to "$QUERY_TO"
 fi
 

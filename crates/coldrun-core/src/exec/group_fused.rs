@@ -731,14 +731,14 @@ fn try_fused_counter_avg_url_len(
         ColumnData::Int32(cols) => {
             for_each_selected(&mask, row_count, |i| {
                 let b = groups.entry(cols[i]).or_insert_with(Bucket::default);
-                b.sum_len += urls[i].chars().count() as u128;
+                b.sum_len += urls[i].len() as u128;
                 b.count += 1;
             });
         }
         ColumnData::Int16(cols) => {
             for_each_selected(&mask, row_count, |i| {
                 let b = groups.entry(i32::from(cols[i])).or_insert_with(Bucket::default);
-                b.sum_len += urls[i].chars().count() as u128;
+                b.sum_len += urls[i].len() as u128;
                 b.count += 1;
             });
         }

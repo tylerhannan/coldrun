@@ -226,7 +226,7 @@ pub(crate) fn sort_rows(
     Ok(())
 }
 
-/// Sort (and LIMIT/OFFSET) grouped rows; ties break by first table row seen (DuckDB threads=1).
+/// Sort (and LIMIT/OFFSET) grouped rows; ties break by first table row seen (deterministic order).
 pub(crate) fn finalize_rows(
     parsed: &ParsedQuery,
     columns: &[String],
