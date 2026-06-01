@@ -19,7 +19,7 @@ Coldrun is the database under test. It does not run ClickBench for other systems
 | 1. Architecture doc | Done | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | 2. MVP: load `hits`, queries 1–5 | Done | demo + Parquet (dynamic schema) |
 | 3. All 43 queries correct | Done | Demo smoke + **43/43 vs ClickHouse** on 1M Parquet ([`validation-1m.md`](docs/benchmarks/parquet/validation-1m.md)) |
-| 4. Optimize Combined score | In progress | 1M hot sum **5.44s** (~2.6× ClickHouse `file()` on same slice) — [`docs/PERF.md`](docs/PERF.md) |
+| 4. Optimize Combined score | In progress | 1M hot sum **3.39s** (~1.6× ClickHouse on same slice) — [`docs/PERF.md`](docs/PERF.md) |
 | 5. ClickBench PR | Not started | [`clickbench/coldrun/`](clickbench/coldrun/) harness |
 
 ## Prerequisites
@@ -106,9 +106,9 @@ docs/benchmarks/       # committed timing + validation snapshots
 
 **Correctness:** demo @ 100k and 1M Parquet both **43/43** (ClickHouse reference).
 
-**Perf (1M Parquet, warm serve):** hot sum **5.44s** — slowest Q33 (1.29s), Q35, Q19, Q40. Roughly **~2.6×** slower than ClickHouse local scanning the same Parquet slice (~2.1s sum, not an official benchmark). See [`docs/benchmarks/parquet/README.md`](docs/benchmarks/parquet/README.md).
+**Perf (1M Parquet, warm serve):** hot sum **3.39s** — slowest Q40 (0.31s), Q23, Q41, Q38. Roughly **~1.6×** slower than ClickHouse local on the same Parquet slice (~2.1s sum, informal; not an official benchmark). See [`docs/benchmarks/parquet/README.md`](docs/benchmarks/parquet/README.md).
 
-1. **Q33 / Q35 / Q19 / Q40** — close gap on heavy GROUP BY (biggest wins on real data)
+1. **Q40 / Q23 / Q41 / Q38** — close remaining gap on heavy GROUP BY (target ~parity on 1M slice)
 2. **ClickHouse parquet bench script** — committed side-by-side snapshot (validate exists; perf compare is manual today)
 3. **Scale** — 10M+ slice validation; full 100M only for ClickBench cloud run
 4. **ClickBench PR** — `clickbench/coldrun/benchmark.sh` on `c6a.4xlarge`

@@ -35,6 +35,4 @@ COLDRUN_DATA="$PWD/.coldrun-validate-hits-1m_" BENCH_SNAPSHOT_SLUG=parquet-hits-
 
 ## Hot timing (serve, Q1–43)
 
-Snapshot: [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) — hot sum **5.44s** @ 1M rows.
-
-Informal ClickHouse reference on the same slice: **~2.1s** sum (`clickhouse local` + `file()` Parquet, one run per query). See [`README.md`](README.md#informal-perf-vs-clickhouse-same-1m-slice-laptop).
+Snapshot: [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) — hot sum **3.39s** @ 1M rows (~**1.6×** ClickHouse ~2.1s on same slice).

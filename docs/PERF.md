@@ -124,15 +124,14 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | pass 10 | Utf8 `.col.idx` sidecar, parallel `project_rows`, streaming top-K Q25–26 — [`pass-10.md`](benchmarks/demo-100k/pass-10.md) |
 | pass 11 | Zone EventTime top-K, Q6 ahash DISTINCT, Q23/Q27 scan filters — [`pass-11.md`](benchmarks/demo-100k/pass-11.md) |
 | bench-serve | Warm-server hot snapshots, compare vs `latest.md` — [`serve-hot.md`](benchmarks/demo-100k/serve-hot.md) |
-| parquet 1M | ClickHouse validation, Q29/Q35/Q43 fused, serve-hot **5.44s** — [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) |
+| parquet 1M | ClickHouse validation, top-K heap pass, serve-hot **3.39s** (~1.6× CH) — [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) |
 
 ## Next (planned)
 
-1. **Q33** — streaming top-K or lighter path for WatchID+ClientIP (dominates 1M hot sum)
-2. **Q35 / Q19 / Q40 / Q34** — extend fused top-K patterns from Q19/Q35 work
-3. **`bench-clickhouse-parquet.sh`** — committed ClickHouse timing snapshot next to `serve-hot.md`
-4. **Non-monotonic EventTime** — zone heap merge when row order ≠ time order on full Parquet loads
-5. **ClickBench cloud run** — official Combined score on `c6a.4xlarge`
+1. **Q40 / Q23 / Q41 / Q38** — close remaining gap toward parity on 1M slice
+2. **`bench-clickhouse-parquet.sh`** — committed ClickHouse timing snapshot next to `serve-hot.md`
+3. **Non-monotonic EventTime** — zone heap merge when row order ≠ time order on full Parquet loads
+4. **ClickBench cloud run** — official Combined score on `c6a.4xlarge`
 
 ## Honest scope
 
