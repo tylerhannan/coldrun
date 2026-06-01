@@ -91,14 +91,21 @@ bench_compare_latest_md() {
 
 bench_write_hot_snapshot() {
   local out="$1" rows="$2" data_bytes="$3" git_ref="${4:-}"
-  local query_num hot sum
+  local query_num hot sum slug="${BENCH_SNAPSHOT_SLUG:-}"
   mkdir -p "$(dirname "$out")"
   sum=$(bench_hot_sum)
   {
-    echo "# Serve hot — ${rows} demo rows"
-    echo
-    echo "**Command:** \`./scripts/bench-serve.sh ${rows}\`"
-    echo "**Protocol:** warm \`serve\`, 3 tries/query, hot = min(try 2, try 3)"
+    if [ "$slug" = "parquet-hits-1m" ]; then
+      echo "# Serve hot — 1M parquet \`hits\` slice"
+      echo
+      echo "**Command:** \`COLDRUN_DATA=.coldrun-validate-hits-1m_ ./scripts/bench-serve.sh 1000000 --skip-load --no-compare\`  "
+      echo "**Protocol:** warm \`serve\`, 3 tries/query, hot = min(try 2, try 3)  "
+    else
+      echo "# Serve hot — ${rows} demo rows"
+      echo
+      echo "**Command:** \`./scripts/bench-serve.sh ${rows}\`"
+      echo "**Protocol:** warm \`serve\`, 3 tries/query, hot = min(try 2, try 3)"
+    fi
     [ -n "$git_ref" ] && echo "**Commit:** \`${git_ref}\`"
     echo "**Data size:** ${data_bytes} bytes"
     echo
@@ -116,9 +123,21 @@ bench_write_hot_snapshot() {
       echo "| $query_num | $hot | $cold |"
     done < "$BENCH_QUERIES_FILE"
     echo
-    echo "**Hot sum:** ${sum}s — comparable shape to ClickBench hot; not leaderboard-valid without 100M + VM."
-    echo
-    echo "Regenerate: \`./scripts/bench-serve.sh ${rows} --write-snapshot\`"
+    if [ "$slug" = "parquet-hits-1m" ]; then
+      echo "**Hot sum (Q1–43):** ${sum}s"
+      echo
+      echo "Regenerate:"
+      echo
+      echo '```bash'
+      echo 'COLDRUN_DATA="$PWD/.coldrun-validate-hits-1m_" BENCH_SNAPSHOT_SLUG=parquet-hits-1m \'
+      echo '  env -u BENCH_QUERY_TO -u BENCH_QUERY_FROM \'
+      echo '  ./scripts/bench-serve.sh 1000000 --skip-load --no-compare --write-snapshot'
+      echo '```'
+    else
+      echo "**Hot sum:** ${sum}s — comparable shape to ClickBench hot; not leaderboard-valid without 100M + VM."
+      echo
+      echo "Regenerate: \`./scripts/bench-serve.sh ${rows} --write-snapshot\`"
+    fi
   } >"$out"
   echo "wrote $out" >&2
 }

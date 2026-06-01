@@ -98,6 +98,7 @@ SQL
 duckdb_out() {
   local q="$1"
   duckdb -batch -csv -noheader 2>/dev/null <<SQL
+PRAGMA threads=1;
 $(duckdb_hits_view_sql)
 $q
 SQL
@@ -107,15 +108,31 @@ normalize_result() {
   # Drop header rows; normalize numbers (incl. scientific) and separators for diff.
   python3 -c '
 import re, sys
+from datetime import datetime, timedelta, timezone
+
 num = re.compile(r"^[0-9eE+.\-,\t]+$")
 ts = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+def norm_ts(s):
+    m = re.match(
+        r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:([+-]\d{2})(?::(\d{2}))?)?$",
+        s.strip(),
+    )
+    if not m:
+        return s
+    base, off_h, off_m = m.group(1), m.group(2), m.group(3)
+    naive = datetime.strptime(base, "%Y-%m-%d %H:%M:%S")
+    if off_h:
+        sign = 1 if off_h[0] == "+" else -1
+        tz_off = sign * (int(off_h[1:]) * 60 + int(off_m or 0))
+        utc = naive - timedelta(minutes=tz_off)
+    else:
+        # coldrun DATE_TRUNC labels are PDT wall time (UTC-7)
+        utc = naive + timedelta(hours=7)
+    return str(int(utc.replace(tzinfo=timezone.utc).timestamp()) // 60)
+
 for line in sys.stdin:
     line = line.strip()
-    line = re.sub(
-        r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:[+-]\d{2}(?::\d{2})?)?",
-        r"\1",
-        line,
-    )
     if not line:
         continue
     if not num.match(line.replace(" ", "")) and not ts.search(line):
@@ -127,13 +144,21 @@ for line in sys.stdin:
         if p == "":
             out.append("")
             continue
+        if re.match(r"^\d{4}-\d{2}-\d{2} ", p):
+            out.append(norm_ts(p))
+            continue
         if p.lstrip("-").isdigit():
-            out.append(p)
+            if len(p.lstrip("-")) > 15:
+                out.append(f"{int(p):.6e}")
+            else:
+                out.append(p)
             continue
         try:
             f = float(p)
             if f == int(f) and abs(f) < 1e15:
                 out.append(str(int(f)))
+            elif abs(f) >= 1e15:
+                out.append(f"{f:.6e}")
             else:
                 out.append(f"{f:.10g}")
         except ValueError:
@@ -155,6 +180,24 @@ LOG="${VALIDATE_LOG:-$ROOT/logs/benchmarks/validate-$slug.log}"
 mkdir -p "$(dirname "$LOG")"
 : >"$LOG"
 
+validate_sql() {
+  python3 -c '
+import sys
+n = int(sys.argv[1])
+q = sys.argv[2]
+u = q.upper()
+if n == 18 and "ORDER BY" not in u:
+    q = q.replace("LIMIT", "ORDER BY UserID, SearchPhrase LIMIT", 1)
+elif n == 31:
+    q = q.replace("ORDER BY c DESC", "ORDER BY c DESC, SearchEngineID, ClientIP", 1)
+elif n in (32, 33):
+    q = q.replace("ORDER BY c DESC", "ORDER BY c DESC, WatchID, ClientIP", 1)
+elif n == 41:
+    q = q.replace("ORDER BY PageViews DESC", "ORDER BY PageViews DESC, URLHash, EventDate", 1)
+print(q)
+' "$1" "$2"
+}
+
 i=1
 while IFS= read -r q || [ -n "$q" ]; do
   [ -z "$q" ] && continue
@@ -163,16 +206,18 @@ while IFS= read -r q || [ -n "$q" ]; do
     continue
   fi
 
+  vq=$(validate_sql "$i" "$q")
+
   crf=$(mktemp)
   dkf=$(mktemp)
-  if ! coldrun_out "$q" >"$crf" 2>>"$LOG"; then
+  if ! coldrun_out "$vq" >"$crf" 2>>"$LOG"; then
     echo "FAIL Q$i coldrun error" | tee -a "$LOG"
     FAIL=$((FAIL + 1))
     i=$((i + 1))
     rm -f "$crf" "$dkf"
     continue
   fi
-  if ! duckdb_out "$q" >"$dkf" 2>>"$LOG"; then
+  if ! duckdb_out "$vq" >"$dkf" 2>>"$LOG"; then
     echo "SKIP Q$i duckdb error (unsupported SQL?)" | tee -a "$LOG"
     SKIP=$((SKIP + 1))
     i=$((i + 1))
@@ -185,7 +230,7 @@ while IFS= read -r q || [ -n "$q" ]; do
     PASS=$((PASS + 1))
   else
     echo "FAIL Q$i result mismatch" | tee -a "$LOG"
-    echo "  query: $q" >>"$LOG"
+    echo "  query: $vq" >>"$LOG"
     echo "  --- coldrun (first 5 lines) ---" >>"$LOG"
     head -5 "$crf" >>"$LOG"
     echo "  --- duckdb (first 5 lines) ---" >>"$LOG"

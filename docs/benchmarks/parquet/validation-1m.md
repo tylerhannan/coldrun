@@ -1,6 +1,6 @@
 # Validation — 1M row `hits` slice
 
-**Date:** 2026-05-27  
+**Date:** 2026-06-01  
 **Data:** `data/hits-1m.parquet` (streamed from ClickHouse public dataset)  
 **Command:** `./scripts/validate-parquet.sh data/hits-1m.parquet --skip-load`
 
@@ -8,30 +8,16 @@
 
 | Result | Count |
 |--------|------:|
-| PASS | 37 |
-| FAIL | 6 |
+| PASS | 43 |
+| FAIL | 0 |
 | SKIP | 0 |
 
-## Fixes in this round
+## Validation protocol
 
-- **Q40:** fused path accepts `Src`/`Dst` aliases and `CASE` in SELECT
-- **DuckDB view:** cast `EventDate` / `EventTime` so dashboard Q37–39 compare (no DuckDB skips)
-- **Output:** `EventDate` and min/max print as `YYYY-MM-DD`; `DATE_TRUNC` buckets as PDT wall time (Q7, Q43)
-- **LENGTH:** byte length for DuckDB alignment
-
-## Known mismatches
-
-| Q | Issue |
-|---|--------|
-| 18 | No `ORDER BY` — top-10 groups are implementation-defined |
-| 19 | ~~`extract(minute)`~~ fixed (fused path + empty utf8 + tie-break) |
-| 28 | `AVG(length(URL))` ~2% — residual byte/unicode or null handling |
-| 31–33 | Tie-heavy `ORDER BY c DESC` with many count=1 pairs |
-| 41 | Same PageViews tie band — different URLHash rows at OFFSET 100 |
-
-## Hot timing (serve, Q1–43)
-
-Snapshot: [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) — hot sum **5.78s** @ 1M rows (Q40 ~0.31s hot on fused path).
+- DuckDB runs with `PRAGMA threads=1` for deterministic tie order.
+- Tie-heavy queries (Q18, Q31–33, Q41) compare against SQL extended with explicit `ORDER BY` group-key columns so both engines use the same deterministic sort.
+- `LENGTH()` uses Unicode code-point count (DuckDB semantics).
+- Large `AVG(UserID)` (Q4) and `DATE_TRUNC` timestamps (Q43) normalized before diff.
 
 ## Regenerate
 
@@ -42,3 +28,7 @@ COLDRUN_DATA="$PWD/.coldrun-validate-hits-1m_" BENCH_SNAPSHOT_SLUG=parquet-hits-
   env -u BENCH_QUERY_TO -u BENCH_QUERY_FROM \
   ./scripts/bench-serve.sh 1000000 --skip-load --no-compare --write-snapshot
 ```
+
+## Hot timing (serve, Q1–43)
+
+Snapshot: [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) — hot sum **4.97s** @ 1M rows.

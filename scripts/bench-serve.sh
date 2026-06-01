@@ -100,6 +100,7 @@ if [ -n "${BENCH_SNAPSHOT_SLUG:-}" ]; then
 else
   slug=$(bench_rows_slug "$ROWS")
 fi
+export BENCH_SNAPSHOT_SLUG="$slug"
 if [ "$COMPARE_ALL" = "1" ]; then
   export BENCH_COMPARE_LATEST="$ROOT/docs/benchmarks/${slug}/latest.md"
 fi
