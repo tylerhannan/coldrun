@@ -47,7 +47,9 @@ Logs (gitignored): `logs/benchmarks/serve-last.log`, `clickbench-last.log`.
 |------|----------|
 | `clickbench/coldrun/result.csv` | `num,try,seconds` per run |
 | `docs/benchmarks/demo-100k/latest.md` | Committed `bench-all` snapshot (CLI per query) |
-| `docs/benchmarks/demo-100k/serve-hot.md` | Committed `bench-serve` hot snapshot (warm server) |
+| `docs/benchmarks/demo-100k/serve-hot.md` | Committed `bench-serve` hot snapshot @ 100k demo |
+| `docs/benchmarks/parquet-hits-1m/serve-hot.md` | Committed `bench-serve` hot snapshot @ 1M Parquet |
+| `docs/benchmarks/parquet/validation-1m.md` | 43/43 ClickHouse validation log summary |
 
 ## Real data without AWS
 
@@ -59,7 +61,9 @@ If you have `hits.parquet` (or a slice) on disk:
 | Correctness | [`validate-parquet.sh`](../../scripts/validate-parquet.sh) `hits-1m.parquet` |
 | Validate + bench | [`measure-parquet.sh`](../../scripts/measure-parquet.sh) `hits-1m.parquet` |
 
-Requires **ClickHouse** in [`clickhouse-local/`](../../clickhouse-local/) (`./scripts/install-clickhouse-local.sh`). Details: [`parquet/README.md`](parquet/README.md).
+Requires **ClickHouse** in [`clickhouse-local/`](../../clickhouse-local/) (`./scripts/install-clickhouse-local.sh`). Validation compares coldrun output to ClickHouse on the same Parquet file. Details: [`parquet/README.md`](parquet/README.md).
+
+**1M snapshot (warm serve, hot sum):** coldrun **5.44s** vs ClickHouse local **`file()` scan ~2.1s** on the same slice (informal; not ClickBench protocol).
 
 ## Cloud (when available)
 

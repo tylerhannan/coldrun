@@ -2,7 +2,26 @@
 
 Coldrun optimizes for ClickBench **Combined** (hot 60%, cold 20%, load 10%, disk 10%). See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design.
 
-## Local benchmarking (no `hits.parquet`)
+## Real Parquet @ 1M rows
+
+Correctness and timing on a streamed slice of real `hits` (not synthetic demo):
+
+| | Coldrun (warm serve, hot) | ClickHouse local (`file()` Parquet) |
+|--|---------------------------|-------------------------------------|
+| **Sum Q1–43** | **5.44s** | **~2.1s** (single CLI run per query, same slice) |
+| **Correctness** | 43/43 vs ClickHouse | reference |
+
+Snapshots: [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) · validation: [`parquet/validation-1m.md`](benchmarks/parquet/validation-1m.md).
+
+```bash
+./scripts/install-clickhouse-local.sh
+./scripts/validate-parquet.sh data/hits-1m.parquet
+COLDRUN_DATA=.coldrun-validate-hits-1m_ ./scripts/bench-serve.sh 1000000 --skip-load --no-compare --write-snapshot
+```
+
+Laptop numbers only — not ClickBench Combined (no cold protocol, no 100M rows, no `c6a.4xlarge`). Coldrun wins on a few fused queries (e.g. Q29 referer host); loses most on wide GROUP BY (Q33 worst).
+
+## Local benchmarking (demo)
 
 ```bash
 ./scripts/bench-demo.sh           # default 100k synthetic rows
@@ -31,7 +50,7 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | **Fast global aggregates** | `COUNT(*)` / `SUM` / `AVG` / `MIN`/`MAX` on one column without per-row interpreter |
 | **LZ4 column files** | Optional compression on flush for payloads &gt; 4 KB (backward-compatible read) |
 | **Integer GROUP BY** | Packed `u128` keys for up to four int/date keys incl. `col - N` (Q36) (`group_int.rs`) |
-| **Referer host GROUP BY** | Cached regex host extraction for Q29 (`group_referrer.rs`) |
+| **Referer host GROUP BY** | Fused single-pass host agg on real Parquet (`group_fused_q29.rs`; was `group_referrer.rs`) |
 | **HAVING shortcut** | Empty result when `COUNT(*) > N` and `N` ≥ filtered rows (Q28–29 demo) |
 | **Top-K partial sort** | `select_nth_unstable_by` before full sort when `LIMIT` + many groups |
 | **Int COUNT DISTINCT** | `HashSet<i64>` instead of string keys on numeric columns |
@@ -65,14 +84,17 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | **Q6 ahash DISTINCT** | COUNT DISTINCT SearchPhrase without utf8 arena intern |
 | **Group hash reserve** | Pre-size hash tables from filtered row count |
 | **Q27 scan** | Two-key `ORDER BY EventTime, SearchPhrase` |
-| **Q29 fast path** | Single-pass (parallel @1M+) for 90× `SUM(ResolutionWidth + k)` |
+| **Q29 fast path** | Wide SUM fast path (Q30 in `fast_q29.rs`); referer host fused GROUP BY (Q29 in `group_fused_q29.rs`) |
 | **Q28 fused** | CounterID + `AVG(length(URL))` + HAVING without per-row interpreter |
 | **Q19 fused + top-K** | Fused path accepts `Other` projections; exact counts + tie-break on group keys |
 | **Sparse masks** | Iterate selected row indices when filter is selective |
 | **mmap columns** | Files &gt; 64 KB decoded via `memmap2` |
 | **Parallel Parquet load** | Per-batch column extract with `rayon` |
+| **Q29 referer fused** | Single-pass host agg on real Parquet (`group_fused_q29.rs`) |
+| **Q35 / Q43 fused** | Top-K `GROUP BY 1, URL`; minute-bucket DATE_TRUNC path |
+| **ClickHouse validate** | `validate-parquet.sh` + CI job; semantics aligned (LENGTH bytes, UTC timestamps, Float64 AVG) |
 | **bench-all.sh** | Time all 43 queries on demo data |
-| **CI** | GitHub Actions: build + `smoke-all.sh 10000` |
+| **CI** | Build + demo smoke; separate job validates 1M Parquet vs ClickHouse |
 
 ```bash
 ./scripts/bench-all.sh 100000    # all 43 queries
@@ -102,11 +124,15 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | pass 10 | Utf8 `.col.idx` sidecar, parallel `project_rows`, streaming top-K Q25–26 — [`pass-10.md`](benchmarks/demo-100k/pass-10.md) |
 | pass 11 | Zone EventTime top-K, Q6 ahash DISTINCT, Q23/Q27 scan filters — [`pass-11.md`](benchmarks/demo-100k/pass-11.md) |
 | bench-serve | Warm-server hot snapshots, compare vs `latest.md` — [`serve-hot.md`](benchmarks/demo-100k/serve-hot.md) |
+| parquet 1M | ClickHouse validation, Q29/Q35/Q43 fused, serve-hot **5.44s** — [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) |
 
 ## Next (planned)
 
-1. **Q23 / Q40** — further multi-agg and dashboard tuning on demo
-2. **Non-monotonic EventTime** — zone heap merge for real `hits.parquet` loads
+1. **Q33** — streaming top-K or lighter path for WatchID+ClientIP (dominates 1M hot sum)
+2. **Q35 / Q19 / Q40 / Q34** — extend fused top-K patterns from Q19/Q35 work
+3. **`bench-clickhouse-parquet.sh`** — committed ClickHouse timing snapshot next to `serve-hot.md`
+4. **Non-monotonic EventTime** — zone heap merge when row order ≠ time order on full Parquet loads
+5. **ClickBench cloud run** — official Combined score on `c6a.4xlarge`
 
 ## Honest scope
 

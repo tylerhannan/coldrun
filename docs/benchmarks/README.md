@@ -1,16 +1,17 @@
 # Benchmarks
 
-Committed timing snapshots for local **demo** regression (`./scripts/bench-all.sh`). Not ClickBench leaderboard numbers.
+Committed timing snapshots for local regression. **Demo** = synthetic `hits`; **Parquet** = real ClickHouse dataset slice.
 
 **How to measure:** [`MEASUREMENT.md`](MEASUREMENT.md) — `bench-all` vs `bench-serve` vs `bench-clickbench`.
 
 | Path | What |
 |------|------|
 | [`MEASUREMENT.md`](MEASUREMENT.md) | Which script matches ClickBench hot/cold |
-| [`demo-100k/`](demo-100k/) | All 43 queries @ 100k synthetic rows — **start here** |
+| [`demo-100k/`](demo-100k/) | All 43 queries @ 100k synthetic rows — **dev regression** |
 | [`demo-500k/`](demo-500k/) | Heavier stress run @ 500k rows |
+| [`parquet/`](parquet/) | Real `hits` Parquet: ClickHouse validate + measure |
+| [`parquet-hits-1m/`](parquet-hits-1m/) | **1M row** warm-serve hot snapshot (**5.44s** sum) |
 | [`regression/`](regression/) | Early milestone / batch status notes (historical) |
-| [`parquet/`](parquet/) | Real `hits.parquet` validate + measure (no cloud) |
 
 ## Run locally
 
