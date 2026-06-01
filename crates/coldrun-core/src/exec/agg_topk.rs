@@ -77,14 +77,39 @@ impl<K: Hash + Eq + Clone + Ord> StreamingTopK<K> {
         G: FnMut(&K) -> String,
         T: Clone,
     {
-        let mut pairs: Vec<(u64, String, T)> = self
-            .counts
+        let need = self.limit.saturating_add(self.offset);
+        if need == 0 {
+            return Vec::new();
+        }
+        // Min-heap on (count, Reverse(tie)) so peek evicts the worst kept row: lowest count,
+        // then largest tie key among ties (ORDER BY count DESC, tie ASC).
+        let mut heap: BinaryHeap<Reverse<(u64, Reverse<String>, usize)>> = BinaryHeap::new();
+        let mut storage: Vec<T> = Vec::new();
+
+        for (k, c) in self.counts {
+            let tk = tie_key(&k);
+            if heap.len() < need {
+                let idx = storage.len();
+                storage.push(row(k, c));
+                heap.push(Reverse((c, Reverse(tk), idx)));
+            } else if let Some(&Reverse((min_c, Reverse(ref max_tk), _))) = heap.peek() {
+                if c > min_c || (c == min_c && tk < *max_tk) {
+                    let idx = storage.len();
+                    storage.push(row(k, c));
+                    heap.push(Reverse((c, Reverse(tk), idx)));
+                    if heap.len() > need {
+                        heap.pop();
+                    }
+                }
+            }
+        }
+
+        let mut pairs: Vec<(u64, String, T)> = heap
             .into_iter()
-            .map(|(k, c)| (c, tie_key(&k), row(k, c)))
+            .map(|Reverse((c, Reverse(tk), i))| (c, tk, storage[i].clone()))
             .collect();
         pairs.sort_by(|a, b| {
-            b.0
-                .cmp(&a.0)
+            b.0.cmp(&a.0)
                 .then_with(|| a.1.cmp(&b.1))
         });
         pairs

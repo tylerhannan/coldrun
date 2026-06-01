@@ -39,9 +39,14 @@ fi
 OUT="$(cd "$(dirname "$OUT")" 2>/dev/null && pwd)/$(basename "$OUT")" || OUT="$(pwd)/$(basename "$OUT")"
 
 echo "sampling $ROWS rows from $SRC -> $OUT" >&2
+if [[ "$SRC" == https://* ]]; then
+  FROM_EXPR="url('$PARQUET_SRC', Parquet)"
+else
+  FROM_EXPR="file('$PARQUET_SRC', Parquet)"
+fi
 "$CH" local --query "
 INSERT INTO FUNCTION file('$OUT', Parquet)
-SELECT * FROM file('$PARQUET_SRC', Parquet) LIMIT $ROWS
+SELECT * FROM $FROM_EXPR LIMIT $ROWS
 "
 
 du -sh "$OUT" | awk '{print "wrote", $1, "->", "'"$OUT"'"}' >&2

@@ -8,7 +8,7 @@ Correctness and timing on a streamed slice of real `hits` (not synthetic demo):
 
 | | Coldrun (warm serve, hot) | ClickHouse local (`file()` Parquet) |
 |--|---------------------------|-------------------------------------|
-| **Sum Q1–43** | **5.44s** | **~2.1s** (single CLI run per query, same slice) |
+| **Sum Q1–43** | **3.39s** | **~2.1s** (single CLI run per query, same slice; see note) |
 | **Correctness** | 43/43 vs ClickHouse | reference |
 
 Snapshots: [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) · validation: [`parquet/validation-1m.md`](benchmarks/parquet/validation-1m.md).
@@ -19,7 +19,7 @@ Snapshots: [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot
 COLDRUN_DATA=.coldrun-validate-hits-1m_ ./scripts/bench-serve.sh 1000000 --skip-load --no-compare --write-snapshot
 ```
 
-Laptop numbers only — not ClickBench Combined (no cold protocol, no 100M rows, no `c6a.4xlarge`). Coldrun wins on a few fused queries (e.g. Q29 referer host); loses most on wide GROUP BY (Q33 worst).
+Laptop numbers only — not ClickBench Combined (no cold protocol, no 100M rows, no `c6a.4xlarge`). After the top-K pass (2025-06), coldrun is ~1.6× ClickHouse on this slice (was ~2.6×). Largest remaining gaps: Q40, Q23, Q41, Q38.
 
 ## Local benchmarking (demo)
 

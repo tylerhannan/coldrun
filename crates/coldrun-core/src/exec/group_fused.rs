@@ -10,7 +10,6 @@ use crate::sql::{expr_column_name, projection_label, ParsedQuery, SelectItemKind
 use crate::storage::{ColumnData, ColumnType, Table};
 use crate::Result;
 
-use super::agg_heap::top_counts_scan_order;
 use super::filter::build_filter_mask;
 use super::group::resolve_group_expr;
 use super::having::having_can_match;
@@ -235,8 +234,66 @@ fn try_fused_int_pair_aggs(
         return Ok(empty_result(parsed));
     };
 
-    let _limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
-    let _offset = parsed.offset.unwrap_or(0) as usize;
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+
+    if limit < usize::MAX && orders_by_count_desc(parsed) {
+        use super::agg_heap::top_counts_u128_key;
+
+        let mut counts: AHashMap<u128, u64> = AHashMap::with_capacity(mask.len() / 4 + 1);
+        for_each_selected(&mask, row_count, |i| {
+            let key = super::column_slice::pack_pair(ic1, ic2, i);
+            *counts.entry(key).or_insert(0) += 1;
+        });
+
+        let top_keys: Vec<u128> = top_counts_u128_key(
+            counts.iter().map(|(&k, &c)| (c, k, k)),
+            limit,
+            offset,
+        );
+
+        let mut aggs: AHashMap<u128, PairAgg> = AHashMap::with_capacity(top_keys.len());
+        for key in &top_keys {
+            let c = counts[key];
+            aggs.insert(
+                *key,
+                PairAgg {
+                    count: c,
+                    ..Default::default()
+                },
+            );
+        }
+
+        for_each_selected(&mask, row_count, |i| {
+            let key = super::column_slice::pack_pair(ic1, ic2, i);
+            let Some(b) = aggs.get_mut(&key) else {
+                return;
+            };
+            if let (Some(ss), Some(as_)) = (sum_slice, avg_slice) {
+                b.sum_b += super::column_slice::int_at(ss, i);
+                b.sum_w += super::column_slice::int_at(as_, i);
+                b.n_w += 1;
+            }
+        });
+
+        let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+        let rows: Vec<Vec<String>> = top_keys
+            .into_iter()
+            .map(|key| {
+                let b = &aggs[&key];
+                let (a, bb) = unpack_pair_keys(c1, c2, key);
+                let avg = b.sum_w as f64 / b.n_w.max(1) as f64;
+                vec![
+                    a,
+                    bb,
+                    b.count.to_string(),
+                    b.sum_b.to_string(),
+                    format!("{avg}"),
+                ]
+            })
+            .collect();
+        return Ok(Some(QueryResult { columns, rows }));
+    }
 
     const SHARDS: usize = 256;
     let mut shards: [AHashMap<u128, PairAgg>; SHARDS] =
@@ -274,6 +331,19 @@ fn try_fused_int_pair_aggs(
         }
     }
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+    if limit < usize::MAX && orders_by_count_desc(parsed) {
+        let rows = super::agg_heap::top_counts_u128_key(
+            rows.into_iter().map(|r| {
+                let a = r[0].parse::<i64>().unwrap_or(0) as u64 as u128;
+                let b = r[1].parse::<i64>().unwrap_or(0) as u64 as u128;
+                let key = (a << 64) | b;
+                (r[2].parse::<u64>().unwrap_or(0), key, r)
+            }),
+            limit,
+            offset,
+        );
+        return Ok(Some(QueryResult { columns, rows }));
+    }
     super::group::finalize_rows(parsed, &columns, &mut rows, &first_seen)?;
     Ok(Some(QueryResult { columns, rows }))
 }
@@ -1258,7 +1328,7 @@ pub(crate) fn finish_count_sorted_scan(
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let offset = parsed.offset.unwrap_or(0) as usize;
-    let rows = top_counts_scan_order(scored, limit, offset);
+    let rows = super::agg_heap::top_counts(scored, limit, offset);
     Ok(Some(QueryResult { columns, rows }))
 }
 
