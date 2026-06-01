@@ -22,6 +22,12 @@ pub fn try_execute_group_fused(
     parsed: &ParsedQuery,
     row_count: usize,
 ) -> Result<Option<QueryResult>> {
+    if let Some(r) = super::group_fused_q29::try_fused_q29(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = super::group_fused_q43::try_fused_q43(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
     if let Some(r) = super::group_fused_q40::try_fused_q40(table, parsed, row_count)? {
         return Ok(Some(r));
     }
@@ -38,6 +44,9 @@ pub fn try_execute_group_fused(
         return Ok(Some(r));
     }
     if let Some(r) = try_fused_q19(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = try_fused_q35(table, parsed, row_count)? {
         return Ok(Some(r));
     }
     if let Some(r) = try_fused_int64_count(table, parsed, row_count)? {
@@ -352,12 +361,23 @@ fn try_fused_utf8_count(
 
     if limit < usize::MAX && !table.demo_near_unique() {
         let mut intern = super::utf8_arena::Utf8Intern::with_capacity(512);
-        let mut topk = super::agg_topk::StreamingTopK::new(limit, offset);
+        let mut topk = if orders_by_count_desc(parsed) {
+            super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, usize::MAX)
+        } else {
+            super::agg_topk::StreamingTopK::new(limit, offset)
+        };
         for_each_selected(&mask, row_count, |i| {
             topk.inc(intern.intern(&data[i]));
         });
         let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-        let rows = topk.finish(|id, c| vec![intern.get(id).to_string(), c.to_string()]);
+        let rows = if orders_by_count_desc(parsed) {
+            topk.finish_with_tie_key(
+                |id, c| vec![intern.get(id).to_string(), c.to_string()],
+                |id| intern.get(*id).to_string(),
+            )
+        } else {
+            topk.finish(|id, c| vec![intern.get(id).to_string(), c.to_string()])
+        };
         return Ok(Some(QueryResult { columns, rows }));
     }
 
@@ -487,6 +507,74 @@ fn split_int_utf8_keys(table: &Table, parsed: &ParsedQuery) -> Result<Option<(St
         (Some(a), Some(b)) => Some((a, b)),
         _ => None,
     })
+}
+
+/// Q35: `GROUP BY 1, URL` + COUNT(*) ORDER BY c DESC LIMIT.
+fn try_fused_q35(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+) -> Result<Option<QueryResult>> {
+    if !is_q35_shape(parsed, table) {
+        return Ok(None);
+    }
+    let ColumnData::Utf8(urls) = table.column("URL")? else {
+        return Ok(None);
+    };
+
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
+    };
+
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+
+    let mut intern = super::utf8_arena::Utf8Intern::with_capacity(limit * 32 + 1);
+    let mut topk = super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, usize::MAX);
+    for_each_selected(&mask, row_count, |i| {
+        topk.inc(intern.intern(&urls[i]));
+    });
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+    let rows = topk.finish_with_tie_key(
+        |id, c| vec!["1".to_string(), intern.get(id).to_string(), c.to_string()],
+        |id| intern.get(*id).to_string(),
+    );
+    Ok(Some(QueryResult { columns, rows }))
+}
+
+fn is_q35_shape(parsed: &ParsedQuery, table: &Table) -> bool {
+    if parsed.group_by.len() != 2 || parsed.having.is_some() {
+        return false;
+    }
+    let mut has_one = false;
+    let mut has_url = false;
+    for expr in &parsed.group_by {
+        let resolved = resolve_group_expr(expr, &parsed.select_items);
+        match &resolved {
+            Expr::Value(Value::Number(n, _)) if n == "1" => has_one = true,
+            Expr::Identifier(id)
+                if id.value == "URL"
+                    && table.column_type("URL") == Some(ColumnType::Utf8) =>
+            {
+                has_url = true
+            }
+            _ => return false,
+        }
+    }
+    if !has_one || !has_url || parsed.select_items.len() != 3 {
+        return false;
+    }
+    matches!(
+        &parsed.select_items[0].kind,
+        SelectItemKind::Other(Expr::Value(Value::Number(n, _))) if n == "1"
+    ) && matches!(
+        parsed.select_items[1].kind,
+        SelectItemKind::Column(_)
+    ) && matches!(
+        parsed.select_items[2].kind,
+        SelectItemKind::CountAll | SelectItemKind::Count(_)
+    ) && orders_by_count_desc(parsed)
+        && parsed.limit.is_some()
 }
 
 /// Q19: UserID + minute(EventTime) + SearchPhrase + COUNT(*).
@@ -711,7 +799,7 @@ fn extract_function_arg0(f: &sqlparser::ast::Function) -> Result<&Expr> {
     Ok(e)
 }
 
-fn parse_having_count_gt(having: Option<&Expr>) -> Option<u64> {
+pub(crate) fn parse_having_count_gt(having: Option<&Expr>) -> Option<u64> {
     let having = having?;
     let Expr::BinaryOp {
         left,

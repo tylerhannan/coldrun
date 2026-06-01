@@ -1,5 +1,3 @@
-use std::sync::LazyLock;
-
 use chrono::{NaiveDate, TimeZone, Utc};
 use regex::Regex;
 use sqlparser::ast::{
@@ -10,10 +8,6 @@ use crate::sql::expr_column_name;
 use crate::storage::ColumnData;
 use crate::storage::Table;
 use crate::Result;
-
-static RE_REFERER_HOST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^https?://(?:www\.)?([^/]+)/.*$").expect("referer regex")
-});
 
 pub fn parse_date_lit(s: &str) -> Result<i32> {
     let d = NaiveDate::parse_from_str(s, "%Y-%m-%d")
@@ -226,12 +220,25 @@ pub fn eval_group_key(table: &Table, expr: &Expr, row: usize) -> Result<String> 
     }
 }
 
+/// Extract host from ClickBench referer URL pattern (Q29) — zero-copy view.
+pub fn referer_host_str(url: &str) -> &str {
+    let rest = if let Some(r) = url.strip_prefix("https://") {
+        r
+    } else if let Some(r) = url.strip_prefix("http://") {
+        r
+    } else {
+        return url;
+    };
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    match rest.find('/') {
+        Some(i) => &rest[..i],
+        None => rest,
+    }
+}
+
 /// Extract host from ClickBench referer URL pattern (Q29).
 pub fn referer_host(url: &str) -> String {
-    if let Some(caps) = RE_REFERER_HOST.captures(url) {
-        return caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-    }
-    url.to_string()
+    referer_host_str(url).to_string()
 }
 
 pub fn eval_like_match(haystack: &str, pattern: &str) -> bool {
