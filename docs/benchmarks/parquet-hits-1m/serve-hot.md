@@ -2,7 +2,7 @@
 
 **Command:** `COLDRUN_DATA=.coldrun-validate-hits-1m_ ./scripts/bench-serve.sh 1000000 --skip-load --no-compare`  
 **Protocol:** warm `serve`, 3 tries/query, hot = min(try 2, try 3)  
-**Commit:** `b65586b`
+**Commit:** `852d454`
 **Data size:** 107069440 bytes
 
 | Q | hot (s) | cold (try 1) |
