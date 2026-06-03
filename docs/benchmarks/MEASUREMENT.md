@@ -8,6 +8,7 @@ ClickBench **Combined** scores need a warm server, three tries per query, and (f
 |--------|--------|----------|-------|---------|
 | [`bench-all.sh`](../../scripts/bench-all.sh) | No (new CLI each query) | 43× process | 1 | Fast dev regression; **not** ClickBench hot |
 | [`bench-serve.sh`](../../scripts/bench-serve.sh) | Yes (`serve`) | None (warm) | 3 | **Hot-shaped** timing; auto-compares to `latest.md` |
+| [`bench-clickhouse-parquet.sh`](../../scripts/bench-clickhouse-parquet.sh) | No (`local --time`) | Per try | 3 | ClickHouse `file()` Parquet hot snapshot + compare |
 | [`bench-clickbench.sh`](../../scripts/bench-clickbench.sh) `--embedded` | Yes | None | 3 | ClickBench output format, warm (quick) |
 | [`bench-clickbench.sh`](../../scripts/bench-clickbench.sh) (default) | Yes | Per query | 3 | Full cold protocol (slow on laptop) |
 
@@ -49,6 +50,8 @@ Logs (gitignored): `logs/benchmarks/serve-last.log`, `clickbench-last.log`.
 | `docs/benchmarks/demo-100k/latest.md` | Committed `bench-all` snapshot (CLI per query) |
 | `docs/benchmarks/demo-100k/serve-hot.md` | Committed `bench-serve` hot snapshot @ 100k demo |
 | `docs/benchmarks/parquet-hits-1m/serve-hot.md` | Committed `bench-serve` hot snapshot @ 1M Parquet |
+| `docs/benchmarks/parquet-hits-1m/clickhouse-hot.md` | Committed ClickHouse `file()` hot snapshot @ 1M Parquet |
+| `docs/benchmarks/parquet-hits-1m/compare-hot.md` | Side-by-side coldrun vs ClickHouse hot sum + per-query |
 | `docs/benchmarks/parquet/validation-1m.md` | 43/43 ClickHouse validation log summary |
 
 ## Real data without AWS
@@ -63,9 +66,9 @@ If you have `hits.parquet` (or a slice) on disk:
 
 Requires **ClickHouse** in [`clickhouse-local/`](../../clickhouse-local/) (`./scripts/install-clickhouse-local.sh`). Validation compares coldrun output to ClickHouse on the same Parquet file. Details: [`parquet/README.md`](parquet/README.md).
 
-**1M snapshot (warm serve, hot sum):** coldrun **2.96s** vs ClickHouse local **~2.1s** on the same slice (~**1.4×**; informal, not ClickBench protocol).
+**1M snapshot (warm serve, hot sum):** coldrun **1.32s** vs ClickHouse **2.21s** on the same slice (**0.60×**). See [`compare-hot.md`](parquet-hits-1m/compare-hot.md).
 
-When you regenerate [`parquet-hits-1m/serve-hot.md`](parquet-hits-1m/serve-hot.md) via `--write-snapshot`, also refresh the summary numbers in [`README.md`](../../README.md), [`PERF.md`](../../PERF.md), [`parquet/README.md`](parquet/README.md), and [`ARCHITECTURE.md`](../../ARCHITECTURE.md).
+When you regenerate [`parquet-hits-1m/serve-hot.md`](parquet-hits-1m/serve-hot.md) or [`clickhouse-hot.md`](parquet-hits-1m/clickhouse-hot.md), also refresh [`compare-hot.md`](parquet-hits-1m/compare-hot.md) and summary numbers in [`README.md`](../../README.md), [`PERF.md`](../../PERF.md), [`parquet/README.md`](parquet/README.md), and [`ARCHITECTURE.md`](../../ARCHITECTURE.md).
 
 ## Cloud (when available)
 

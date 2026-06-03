@@ -53,6 +53,8 @@
 
 **Hot sum (Q1–43):** 1.317000s
 
+ClickHouse comparison: [`compare-hot.md`](compare-hot.md) · [`clickhouse-hot.md`](clickhouse-hot.md)
+
 Regenerate:
 
 ```bash

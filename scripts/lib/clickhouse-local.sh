@@ -54,3 +54,30 @@ $(clickhouse_hits_cte "$parquet")
 $q
 " 2>/dev/null
 }
+
+# Build a full local query (CTE + body) for timing or execution.
+clickhouse_build_query() {
+  local parquet="${1:?}"
+  local sql="${2:?}"
+  cat <<SQL
+SET max_threads = 1;
+SET session_timezone = 'UTC';
+$(clickhouse_hits_cte "$parquet")
+$sql
+SQL
+}
+
+# Run one query via clickhouse-local; print elapsed seconds (last --time line).
+clickhouse_run_timed() {
+  local bin="${1:?}"
+  local parquet="${2:?}"
+  local sql="${3:?}"
+  local out timing
+  out=$("$bin" local --time --max_threads 1 --query "$(clickhouse_build_query "$parquet" "${sql%;}")" 2>&1) || true
+  timing=$(printf '%s\n' "$out" | grep -E '^[0-9]+\.[0-9]+$' | tail -n1)
+  if [ -z "$timing" ]; then
+    echo "null"
+    return 1
+  fi
+  echo "$timing"
+}

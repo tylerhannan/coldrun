@@ -87,4 +87,7 @@ export BENCH_SNAPSHOT_SLUG="parquet-$slug"
 export BENCH_SNAPSHOT_ROWS="$rows"
 export BENCH_SNAPSHOT_BYTES="$(COLDRUN_DATA="$COLDRUN_DATA" "$ROOT/clickbench/coldrun/data-size" 2>/dev/null || echo 0)"
 
-"$ROOT/scripts/bench-serve.sh" 100000 --skip-load --no-compare
+"$ROOT/scripts/bench-serve.sh" 100000 --skip-load --no-compare --write-snapshot
+
+echo "=== bench-clickhouse (file() Parquet hot timing) ===" >&2
+"$ROOT/scripts/bench-clickhouse-parquet.sh" "$WORK" --write-snapshot --compare
