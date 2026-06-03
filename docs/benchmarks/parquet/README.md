@@ -42,10 +42,10 @@ Logs: `logs/benchmarks/validate-*.log`
 
 | Engine | Protocol | Sum Q1–43 |
 |--------|----------|-----------|
-| **coldrun** | warm `serve`, hot = min(try 2, 3) | **3.17s** |
+| **coldrun** | warm `serve`, hot = min(try 2, 3) | **2.96s** |
 | **ClickHouse** | `clickhouse local`, `file()` Parquet, 1 run/query | **~2.1s** |
 
-Not ClickBench Combined — use for relative tuning only (~**1.5×** coldrun vs ClickHouse on this slice). Largest remaining gaps: Q23, Q40, Q41, Q38.
+Not ClickBench Combined — use for relative tuning only (~**1.4×** coldrun vs ClickHouse on this slice). Largest remaining gaps: Q23, Q41, Q40, Q38.
 
 Stream a slice without the full 15 GB download:
 
