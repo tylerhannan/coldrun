@@ -8,7 +8,7 @@ Correctness and timing on a streamed slice of real `hits` (not synthetic demo):
 
 | | Coldrun (warm serve, hot) | ClickHouse local (`file()` Parquet) |
 |--|---------------------------|-------------------------------------|
-| **Sum Q1–43** | **3.17s** | **~2.1s** (single CLI run per query, same slice; see note) |
+| **Sum Q1–43** | **2.96s** | **~2.1s** (single CLI run per query, same slice; see note) |
 | **Correctness** | 43/43 vs ClickHouse | reference |
 
 Snapshots: [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) · validation: [`parquet/validation-1m.md`](benchmarks/parquet/validation-1m.md).
@@ -19,7 +19,7 @@ Snapshots: [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot
 COLDRUN_DATA=.coldrun-validate-hits-1m_ ./scripts/bench-serve.sh 1000000 --skip-load --no-compare --write-snapshot
 ```
 
-Laptop numbers only — not ClickBench Combined (no cold protocol, no 100M rows, no `c6a.4xlarge`). After top-K + fused pair/dashboard passes, coldrun is ~**1.5×** ClickHouse on this slice (was ~2.6×). Largest remaining gaps: Q23, Q40, Q41, Q38.
+Laptop numbers only — not ClickBench Combined (no cold protocol, no 100M rows, no `c6a.4xlarge`). After hash-based utf8 top-K and dashboard pruning, coldrun is ~**1.4×** ClickHouse on this slice (was ~2.6×). Largest remaining gaps: Q23, Q41, Q40, Q38.
 
 ## Local benchmarking (demo)
 
@@ -124,7 +124,7 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | pass 10 | Utf8 `.col.idx` sidecar, parallel `project_rows`, streaming top-K Q25–26 — [`pass-10.md`](benchmarks/demo-100k/pass-10.md) |
 | pass 11 | Zone EventTime top-K, Q6 ahash DISTINCT, Q23/Q27 scan filters — [`pass-11.md`](benchmarks/demo-100k/pass-11.md) |
 | bench-serve | Warm-server hot snapshots, compare vs `latest.md` — [`serve-hot.md`](benchmarks/demo-100k/serve-hot.md) |
-| parquet 1M | Top-K heap, int-pair COUNT, Q17/Q23/Q40/Q41 fused, serve-hot **3.17s** (~1.5× CH) — [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) |
+| parquet 1M | Hash utf8 top-K (Q34/35), Q23 index pass, Q40 two-pass, serve-hot **2.96s** (~1.4× CH) — [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) |
 
 ## Next (planned)
 

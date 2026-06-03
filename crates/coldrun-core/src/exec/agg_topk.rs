@@ -30,6 +30,14 @@ impl<K: Hash + Eq + Clone + Ord> StreamingTopK<K> {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.counts.len()
+    }
+
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.counts.contains_key(key)
+    }
+
     pub fn inc(&mut self, key: K) {
         *self.counts.entry(key).or_insert(0) += 1;
         let need = self.limit.saturating_add(self.offset);

@@ -1,5 +1,6 @@
 //! Q40: dashboard filter + CASE referer src + URL dst + COUNT (no per-row interpreter).
 
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 use ahash::{AHashMap, AHasher};
@@ -75,8 +76,24 @@ pub fn try_fused_q40(
     let offset = parsed.offset.unwrap_or(0) as usize;
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
 
-    let mut samples: AHashMap<Q40Key, (String, String)> = AHashMap::with_capacity(512);
     let mut topk = StreamingTopK::with_prune_factor(limit, offset, 32);
+    for_each_selected(&mask, row_count, |i| {
+        let t = trafic[i];
+        let s = se[i];
+        let a = adv[i];
+        let sh = if s == 0 && a == 0 {
+            hash_str(referer[i].as_str())
+        } else {
+            0
+        };
+        let dh = hash_str(url[i].as_str());
+        topk.inc(Q40Key(t, s, a, sh, dh));
+    });
+
+    let top_entries = topk.top_entries();
+    let key_set: HashSet<Q40Key> = top_entries.iter().map(|(k, _)| *k).collect();
+    let mut samples: AHashMap<Q40Key, (String, String)> =
+        AHashMap::with_capacity(key_set.len());
 
     for_each_selected(&mask, row_count, |i| {
         let t = trafic[i];
@@ -89,23 +106,29 @@ pub fn try_fused_q40(
             (0, "")
         };
         let u = url[i].as_str();
-        let dh = hash_str(u);
-        let key = Q40Key(t, s, a, sh, dh);
-        samples.entry(key).or_insert_with(|| (src_s.to_string(), u.to_string()));
-        topk.inc(key);
+        let key = Q40Key(t, s, a, sh, hash_str(u));
+        if !key_set.contains(&key) {
+            return;
+        }
+        samples
+            .entry(key)
+            .or_insert_with(|| (src_s.to_string(), u.to_string()));
     });
 
-    let rows = topk.finish(|key, c| {
-        let (src, dst) = &samples[&key];
-        vec![
-            key.0.to_string(),
-            key.1.to_string(),
-            key.2.to_string(),
-            src.clone(),
-            dst.clone(),
-            c.to_string(),
-        ]
-    });
+    let rows: Vec<Vec<String>> = top_entries
+        .into_iter()
+        .map(|(key, c)| {
+            let (src, dst) = &samples[&key];
+            vec![
+                key.0.to_string(),
+                key.1.to_string(),
+                key.2.to_string(),
+                src.clone(),
+                dst.clone(),
+                c.to_string(),
+            ]
+        })
+        .collect();
 
     Ok(Some(QueryResult { columns, rows }))
 }

@@ -8,7 +8,7 @@ use crate::sql::{projection_label, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, Table};
 use crate::Result;
 
-use super::agg_heap::top_counts;
+use super::agg_topk::StreamingTopK;
 use super::utf8_arena::Utf8Intern;
 use super::QueryResult;
 
@@ -82,25 +82,32 @@ pub fn try_fused_q23(
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
 
     let mut intern = Utf8Intern::with_capacity(1024);
+    let mut h2id: AHashMap<u64, u32> = AHashMap::with_capacity(512);
 
-    let mut counts: AHashMap<u32, u64> = AHashMap::with_capacity(512);
+    let mut match_rows: Vec<usize> = Vec::with_capacity(row_count / 8);
     for i in 0..row_count {
-        if !q23_row_matches(phrases, urls, titles, i) {
-            continue;
+        if q23_row_matches(phrases, urls, titles, i) {
+            match_rows.push(i);
         }
-        let pid = intern.intern(&phrases[i]);
-        *counts.entry(pid).or_insert(0) += 1;
     }
 
-    let top_pids: Vec<u32> = top_counts(counts.iter().map(|(&pid, &c)| (c, pid)), limit, offset);
+    let mut topk = StreamingTopK::with_prune_factor(limit, offset, 32);
+    for &i in &match_rows {
+        let s = phrases[i].as_str();
+        let h = super::group_fused::hash_str(s);
+        topk.inc(h);
+        if topk.contains_key(&h) {
+            h2id.entry(h).or_insert_with(|| intern.intern(s));
+        }
+    }
+
+    let top_entries = topk.top_entries();
+    let top_pids: Vec<u32> = top_entries.iter().map(|(h, _)| h2id[h]).collect();
     let top_set: HashSet<u32> = top_pids.iter().copied().collect();
 
     let mut groups: AHashMap<u32, Bucket> = AHashMap::with_capacity(top_set.len());
-    for i in 0..row_count {
-        if !q23_row_matches(phrases, urls, titles, i) {
-            continue;
-        }
-        let pid = intern.intern(&phrases[i]);
+    for &i in &match_rows {
+        let pid = h2id[&super::group_fused::hash_str(phrases[i].as_str())];
         if !top_set.contains(&pid) {
             continue;
         }
@@ -134,9 +141,10 @@ pub fn try_fused_q23(
         }
     }
 
-    let rows: Vec<Vec<String>> = top_pids
+    let rows: Vec<Vec<String>> = top_entries
         .into_iter()
-        .map(|pid| {
+        .map(|(h, _)| {
+            let pid = h2id[&h];
             let b = &groups[&pid];
             vec![
                 intern.get(pid).to_string(),

@@ -81,7 +81,7 @@ pub fn try_execute_group_fused(
     Ok(None)
 }
 
-fn hash_str(s: &str) -> u64 {
+pub(crate) fn hash_str(s: &str) -> u64 {
     let mut h = AHasher::default();
     s.hash(&mut h);
     h.finish()
@@ -236,28 +236,46 @@ fn try_fused_int_pair_count(
     let offset = parsed.offset.unwrap_or(0) as usize;
 
     if limit < usize::MAX && orders_by_count_desc(parsed) {
-        use super::agg_heap::top_counts_u128_key;
-
-        let mut counts: AHashMap<u128, u64> = AHashMap::with_capacity(mask.len() / 4 + 1);
-        for_each_selected(&mask, row_count, |i| {
-            let key = super::column_slice::pack_pair(ic1, ic2, i);
-            *counts.entry(key).or_insert(0) += 1;
-        });
-
-        let top_keys: Vec<u128> = top_counts_u128_key(
-            counts.iter().map(|(&k, &c)| (c, k, k)),
-            limit,
-            offset,
-        );
-
         let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-        let rows: Vec<Vec<String>> = top_keys
+        let rows = if offset == 0 && limit <= 25 {
+            let mut topk =
+                super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, 32);
+            for_each_selected(&mask, row_count, |i| {
+                let key = super::column_slice::pack_pair(ic1, ic2, i);
+                topk.inc(key);
+            });
+            topk.finish_with_tie_key(
+                |key, c| {
+                    let (a, bb) = unpack_pair_keys(c1, c2, key);
+                    vec![a, bb, c.to_string()]
+                },
+                |key| {
+                    let a = (key >> 64) as u64 as i64;
+                    let b = *key as u64 as i64;
+                    format!("{:020}\t{:020}", a, b)
+                },
+            )
+        } else {
+            use super::agg_heap::top_counts_u128_key;
+
+            let mut counts: AHashMap<u128, u64> = AHashMap::with_capacity(mask.len() / 4 + 1);
+            for_each_selected(&mask, row_count, |i| {
+                let key = super::column_slice::pack_pair(ic1, ic2, i);
+                *counts.entry(key).or_insert(0) += 1;
+            });
+
+            top_counts_u128_key(
+                counts.iter().map(|(&k, &c)| (c, k, k)),
+                limit,
+                offset,
+            )
             .into_iter()
             .map(|key| {
                 let (a, bb) = unpack_pair_keys(c1, c2, key);
                 vec![a, bb, counts[&key].to_string()]
             })
-            .collect();
+            .collect()
+        };
         return Ok(Some(QueryResult { columns, rows }));
     }
 
@@ -523,22 +541,15 @@ fn try_fused_utf8_count(
     let offset = parsed.offset.unwrap_or(0) as usize;
 
     if limit < usize::MAX && !table.demo_near_unique() {
-        let mut intern = super::utf8_arena::Utf8Intern::with_capacity(512);
-        let mut topk = if orders_by_count_desc(parsed) {
-            super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, usize::MAX)
-        } else {
-            super::agg_topk::StreamingTopK::new(limit, offset)
-        };
-        for_each_selected(&mask, row_count, |i| {
-            topk.inc(intern.intern(&data[i]));
-        });
         let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
         let rows = if orders_by_count_desc(parsed) {
-            topk.finish_with_tie_key(
-                |id, c| vec![intern.get(id).to_string(), c.to_string()],
-                |id| intern.get(*id).to_string(),
-            )
+            utf8_count_topk_by_hash(&data, mask, row_count, limit, offset, true)?
         } else {
+            let mut intern = super::utf8_arena::Utf8Intern::with_capacity(512);
+            let mut topk = super::agg_topk::StreamingTopK::new(limit, offset);
+            for_each_selected(&mask, row_count, |i| {
+                topk.inc(intern.intern(&data[i]));
+            });
             topk.finish(|id, c| vec![intern.get(id).to_string(), c.to_string()])
         };
         return Ok(Some(QueryResult { columns, rows }));
@@ -709,17 +720,50 @@ fn try_fused_q35(
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let offset = parsed.offset.unwrap_or(0) as usize;
 
-    let mut intern = super::utf8_arena::Utf8Intern::with_capacity(limit * 32 + 1);
-    let mut topk = super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, usize::MAX);
-    for_each_selected(&mask, row_count, |i| {
-        topk.inc(intern.intern(&urls[i]));
-    });
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-    let rows = topk.finish_with_tie_key(
-        |id, c| vec!["1".to_string(), intern.get(id).to_string(), c.to_string()],
-        |id| intern.get(*id).to_string(),
-    );
+    let mut rows = utf8_count_topk_by_hash(&urls, mask, row_count, limit, offset, true)?;
+    for r in &mut rows {
+        r.insert(0, "1".to_string());
+    }
     Ok(Some(QueryResult { columns, rows }))
+}
+
+/// COUNT(*) GROUP BY utf8: hash keys + prune so we do not intern every distinct string (Q34/Q35).
+fn utf8_count_topk_by_hash(
+    data: &[String],
+    mask: Vec<bool>,
+    row_count: usize,
+    limit: usize,
+    offset: usize,
+    tie_utf8: bool,
+) -> Result<Vec<Vec<String>>> {
+    let mut intern = super::utf8_arena::Utf8Intern::with_capacity(limit * 32 + 1);
+    let mut h2id: AHashMap<u64, u32> = AHashMap::with_capacity(limit * 32 + 1);
+    let mut topk = super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, 32);
+
+    for_each_selected(&mask, row_count, |i| {
+        let s = data[i].as_str();
+        let h = hash_str(s);
+        topk.inc(h);
+        if topk.contains_key(&h) {
+            h2id.entry(h).or_insert_with(|| intern.intern(s));
+        }
+    });
+
+    if tie_utf8 {
+        Ok(topk.finish_with_tie_key(
+            |h, c| {
+                let id = h2id[&h];
+                vec![intern.get(id).to_string(), c.to_string()]
+            },
+            |h| intern.get(h2id[h]).to_string(),
+        ))
+    } else {
+        Ok(topk.finish(|h, c| {
+            let id = h2id[&h];
+            vec![intern.get(id).to_string(), c.to_string()]
+        }))
+    }
 }
 
 fn is_q35_shape(parsed: &ParsedQuery, table: &Table) -> bool {

@@ -35,7 +35,7 @@ Logs: `logs/benchmarks/validate-*.log`
 ./scripts/measure-parquet.sh data/hits-1m.parquet
 ```
 
-**Latest @ 1M rows:** [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) — coldrun hot sum **3.17s** (Q1–43)  
+**Latest @ 1M rows:** [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) — coldrun hot sum **2.96s** (Q1–43)  
 **Validation:** [`validation-1m.md`](validation-1m.md) — **43/43** vs ClickHouse on same slice.
 
 ### Informal perf vs ClickHouse (same 1M slice, laptop)
