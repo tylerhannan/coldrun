@@ -8,8 +8,8 @@ Correctness and timing on a streamed slice of real `hits` (not synthetic demo):
 
 | | Coldrun (warm serve, hot) | ClickHouse local (`file()` Parquet) |
 |--|---------------------------|-------------------------------------|
-| **Sum Q1–43** | **1.32s** | **2.21s** (3 tries/query, hot = min(2,3), `max_threads=1`) |
-| **Ratio** | **0.60×** ClickHouse | — |
+| **Sum Q1–43** | **1.36s** | **2.14s** (3 tries/query, hot = min(2,3), `max_threads=1`) |
+| **Ratio** | **0.63×** ClickHouse | — |
 | **Correctness** | 43/43 vs ClickHouse | reference |
 
 Snapshots: [`serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) · [`clickhouse-hot.md`](benchmarks/parquet-hits-1m/clickhouse-hot.md) · [`compare-hot.md`](benchmarks/parquet-hits-1m/compare-hot.md) · validation: [`parquet/validation-1m.md`](benchmarks/parquet/validation-1m.md).
@@ -21,7 +21,7 @@ COLDRUN_DATA=.coldrun-validate-hits-1m_ ./scripts/bench-serve.sh 1000000 --skip-
 ./scripts/bench-clickhouse-parquet.sh data/hits-1m.parquet --write-snapshot --compare
 ```
 
-Laptop numbers only — not ClickBench Combined (no cold protocol, no 100M rows, no `c6a.4xlarge`). On this 1M slice coldrun is **~0.60×** ClickHouse hot sum. Largest remaining gaps vs CH: Q41, Q36, Q29 (coldrun slower); Q23/Q40 now faster on coldrun.
+Laptop numbers only — not ClickBench Combined (no cold protocol, no 100M rows, no `c6a.4xlarge`). On this 1M slice coldrun is **~0.63×** ClickHouse hot sum. Largest remaining gaps vs CH: **Q36**, **Q41** (coldrun slower on full scan / dashboard agg); warm CH server compare on cloud.
 
 ## Local benchmarking (demo)
 
@@ -97,6 +97,8 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | **Q29 referer fused** | Single-pass host agg on real Parquet (`group_fused_q29.rs`) |
 | **Q35 / Q43 fused** | Top-K `GROUP BY 1, URL`; minute-bucket DATE_TRUNC path |
 | **ClickHouse validate** | `validate-parquet.sh` + CI job; semantics aligned (LENGTH bytes, UTC timestamps, Float64 AVG) |
+| **Q41 single-pass fused** | Dashboard filter + URLHash/EventDate COUNT without 1M sub-masks (`group_fused_q41.rs`) |
+| **Dashboard mask narrow** | In-place AND on sparse dashboard mask (no alloc per predicate) |
 | **ClickHouse parquet bench** | `bench-clickhouse-parquet.sh` — committed `clickhouse-hot.md` + `compare-hot.md` |
 | **bench-all.sh** | Time all 43 queries on demo data |
 | **CI** | Build + demo smoke; separate job validates 1M Parquet vs ClickHouse |
@@ -130,13 +132,13 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | pass 11 | Zone EventTime top-K, Q6 ahash DISTINCT, Q23/Q27 scan filters — [`pass-11.md`](benchmarks/demo-100k/pass-11.md) |
 | bench-serve | Warm-server hot snapshots, compare vs `latest.md` — [`serve-hot.md`](benchmarks/demo-100k/serve-hot.md) |
 | parquet 1M | Contiguous utf8 + serve cache, Q23 rewrite, serve-hot **1.32s** — [`compare-hot.md`](benchmarks/parquet-hits-1m/compare-hot.md) (0.60× CH **2.21s**) |
-| CH parquet bench | `bench-clickhouse-parquet.sh` snapshots — [`clickhouse-hot.md`](benchmarks/parquet-hits-1m/clickhouse-hot.md) |
+| Q41 / Q36 pass | Single-pass Q41, parallel ClientIP quad, dashboard mask narrow — [`compare-hot.md`](benchmarks/parquet-hits-1m/compare-hot.md) (0.63× CH **2.14s**) |
 
 ## Next (planned)
 
-1. **Q40 / Q41 / Q36 / Q29** — coldrun still slower than CH on several heavy GROUP BY paths
+1. **Q36 / Q41** — close gap vs CH on full-scan / dashboard int GROUP BY (still ~10× on Q41)
 2. **Non-monotonic EventTime** — zone heap merge when row order ≠ time order on full Parquet loads
-3. **ClickBench cloud run** — official Combined score on `c6a.4xlarge`
+3. **ClickBench cloud run** — official Combined score on `c6a.4xlarge`; warm CH server compare there
 
 ## Honest scope
 

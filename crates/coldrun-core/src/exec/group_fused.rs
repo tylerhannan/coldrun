@@ -27,6 +27,9 @@ pub fn try_execute_group_fused(
     if let Some(r) = super::group_fused_q43::try_fused_q43(table, parsed, row_count)? {
         return Ok(Some(r));
     }
+    if let Some(r) = super::group_fused_q41::try_fused_q41(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
     if let Some(r) = super::group_fused_q40::try_fused_q40(table, parsed, row_count)? {
         return Ok(Some(r));
     }
@@ -85,6 +88,86 @@ pub(crate) fn hash_str(s: &str) -> u64 {
     let mut h = AHasher::default();
     s.hash(&mut h);
     h.finish()
+}
+
+const COUNT_SHARDS: usize = 256;
+
+fn merge_count_shards(
+    mut a: [AHashMap<u128, u64>; COUNT_SHARDS],
+    mut b: [AHashMap<u128, u64>; COUNT_SHARDS],
+) -> [AHashMap<u128, u64>; COUNT_SHARDS] {
+    for i in 0..COUNT_SHARDS {
+        for (k, v) in b[i].drain() {
+            *a[i].entry(k).or_insert(0) += v;
+        }
+    }
+    a
+}
+
+#[inline]
+fn pack_clientip_quad(ip: i32) -> u128 {
+    let ip = ip as u32;
+    (ip as u128)
+        | ((ip.wrapping_sub(1)) as u128) << 32
+        | ((ip.wrapping_sub(2)) as u128) << 64
+        | ((ip.wrapping_sub(3)) as u128) << 96
+}
+
+fn is_clientip_quad_group(exprs: &[Expr]) -> bool {
+    use sqlparser::ast::BinaryOperator;
+    exprs.iter().all(|e| {
+        match e {
+            Expr::Identifier(id) if id.value == "ClientIP" => true,
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Minus,
+                right,
+            } => {
+                matches!(&**left, Expr::Identifier(id) if id.value == "ClientIP")
+                    && matches!(&**right, Expr::Value(Value::Number(_, _)))
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Sharded exact COUNT GROUP BY on packed u128 keys (cache-friendly vs one big map).
+fn sharded_count_u128<F>(mask: &[bool], row_count: usize, cap_hint: usize, key_at: F) -> [AHashMap<u128, u64>; COUNT_SHARDS]
+where
+    F: Fn(usize) -> u128,
+{
+    let cap = (cap_hint / (COUNT_SHARDS * 2)).max(4);
+    let mut shards: [AHashMap<u128, u64>; COUNT_SHARDS] =
+        std::array::from_fn(|_| AHashMap::with_capacity(cap));
+    for_each_selected(mask, row_count, |i| {
+        let key = key_at(i);
+        let shard = (key as usize) % COUNT_SHARDS;
+        *shards[shard].entry(key).or_insert(0) += 1;
+    });
+    shards
+}
+
+fn parallel_sharded_count_u128<F>(row_count: usize, cap_hint: usize, key_at: F) -> [AHashMap<u128, u64>; COUNT_SHARDS]
+where
+    F: Fn(usize) -> u128 + Sync,
+{
+    use rayon::prelude::*;
+    let cap = (cap_hint / (COUNT_SHARDS * 2)).max(4);
+    (0..row_count)
+        .into_par_iter()
+        .fold(
+            || std::array::from_fn(|_| AHashMap::with_capacity(cap)),
+            |mut shards, i| {
+                let key = key_at(i);
+                let shard = (key as usize) % COUNT_SHARDS;
+                *shards[shard].entry(key).or_insert(0) += 1;
+                shards
+            },
+        )
+        .reduce(
+            || std::array::from_fn(|_| AHashMap::with_capacity(cap)),
+            merge_count_shards,
+        )
 }
 
 pub(crate) fn build_mask(
@@ -236,46 +319,25 @@ fn try_fused_int_pair_count(
     let offset = parsed.offset.unwrap_or(0) as usize;
 
     if limit < usize::MAX && orders_by_count_desc(parsed) {
+        use super::agg_heap::top_counts_u128_key;
+
         let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-        let rows = if offset == 0 && limit <= 25 {
-            let mut topk =
-                super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, 32);
-            for_each_selected(&mask, row_count, |i| {
-                let key = super::column_slice::pack_pair(ic1, ic2, i);
-                topk.inc(key);
-            });
-            topk.finish_with_tie_key(
-                |key, c| {
-                    let (a, bb) = unpack_pair_keys(c1, c2, key);
-                    vec![a, bb, c.to_string()]
-                },
-                |key| {
-                    let a = (key >> 64) as u64 as i64;
-                    let b = *key as u64 as i64;
-                    format!("{:020}\t{:020}", a, b)
-                },
-            )
-        } else {
-            use super::agg_heap::top_counts_u128_key;
-
-            let mut counts: AHashMap<u128, u64> = AHashMap::with_capacity(mask.len() / 4 + 1);
-            for_each_selected(&mask, row_count, |i| {
-                let key = super::column_slice::pack_pair(ic1, ic2, i);
-                *counts.entry(key).or_insert(0) += 1;
-            });
-
-            top_counts_u128_key(
-                counts.iter().map(|(&k, &c)| (c, k, k)),
-                limit,
-                offset,
-            )
-            .into_iter()
-            .map(|key| {
-                let (a, bb) = unpack_pair_keys(c1, c2, key);
-                vec![a, bb, counts[&key].to_string()]
-            })
-            .collect()
-        };
+        let shards = sharded_count_u128(&mask, row_count, mask.len(), |i| {
+            super::column_slice::pack_pair(ic1, ic2, i)
+        });
+        let rows: Vec<Vec<String>> = top_counts_u128_key(
+            shards
+                .iter()
+                .flat_map(|m| m.iter().map(|(&k, &c)| (c, k, (k, c)))),
+            limit,
+            offset,
+        )
+        .into_iter()
+        .map(|(key, c)| {
+            let (a, bb) = unpack_pair_keys(c1, c2, key);
+            vec![a, bb, c.to_string()]
+        })
+        .collect();
         return Ok(Some(QueryResult { columns, rows }));
     }
 
@@ -483,7 +545,7 @@ fn int_pair_group_keys(table: &Table, parsed: &ParsedQuery) -> bool {
     })
 }
 
-fn unpack_pair_keys(c1: &ColumnData, c2: &ColumnData, key: u128) -> (String, String) {
+pub(crate) fn unpack_pair_keys(c1: &ColumnData, c2: &ColumnData, key: u128) -> (String, String) {
     let a = (key >> 64) as u64 as i64;
     let b = key as u64 as i64;
     (format_key(c1, a), format_key(c2, b))
@@ -1045,7 +1107,7 @@ pub(crate) fn parse_having_count_gt(having: Option<&Expr>) -> Option<u64> {
     n.parse().ok()
 }
 
-fn orders_by_count_desc(parsed: &ParsedQuery) -> bool {
+pub(crate) fn orders_by_count_desc(parsed: &ParsedQuery) -> bool {
     let Some((expr, desc)) = parsed.order_by.first() else {
         return false;
     };
@@ -1184,60 +1246,85 @@ fn try_fused_int4_count(
     let offset = parsed.offset.unwrap_or(0) as usize;
 
     if limit < usize::MAX && orders_by_count_desc(parsed) {
-        let mut samples: AHashMap<u128, [i32; 4]> = AHashMap::with_capacity(limit * 4 + 1);
-        let mut topk =
-            super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, usize::MAX);
-        for_each_selected(&mask, row_count, |i| {
-            if let Ok(key) = pack4(table, &exprs, i) {
-                samples.entry(key).or_insert_with(|| unpack4(key));
-                topk.inc(key);
-            }
-        });
+        use super::agg_heap::top_counts_u128_key;
+
         let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-        let rows = topk.finish(|key, cnt| {
-            let k = samples[&key];
+        let cap = (mask.len() / (COUNT_SHARDS * 2)).max(4);
+        let shards = if is_clientip_quad_group(&exprs) {
+            if let ColumnData::Int32(ips) = table.column("ClientIP")? {
+                if parsed.where_expr.is_none() && row_count >= 250_000 {
+                    parallel_sharded_count_u128(row_count, mask.len(), |i| pack_clientip_quad(ips[i]))
+                } else {
+                    let mut shards: [AHashMap<u128, u64>; COUNT_SHARDS] =
+                        std::array::from_fn(|_| AHashMap::with_capacity(cap));
+                    for_each_selected(&mask, row_count, |i| {
+                        let key = pack_clientip_quad(ips[i]);
+                        let shard = (key as usize) % COUNT_SHARDS;
+                        *shards[shard].entry(key).or_insert(0) += 1;
+                    });
+                    shards
+                }
+            } else {
+                let mut shards: [AHashMap<u128, u64>; COUNT_SHARDS] =
+                    std::array::from_fn(|_| AHashMap::with_capacity(cap));
+                for_each_selected(&mask, row_count, |i| {
+                    if let Ok(key) = pack4(table, &exprs, i) {
+                        let shard = (key as usize) % COUNT_SHARDS;
+                        *shards[shard].entry(key).or_insert(0) += 1;
+                    }
+                });
+                shards
+            }
+        } else {
+            let mut shards: [AHashMap<u128, u64>; COUNT_SHARDS] =
+                std::array::from_fn(|_| AHashMap::with_capacity(cap));
+            for_each_selected(&mask, row_count, |i| {
+                if let Ok(key) = pack4(table, &exprs, i) {
+                    let shard = (key as usize) % COUNT_SHARDS;
+                    *shards[shard].entry(key).or_insert(0) += 1;
+                }
+            });
+            shards
+        };
+        let rows: Vec<Vec<String>> = top_counts_u128_key(
+            shards
+                .iter()
+                .flat_map(|m| m.iter().map(|(&k, &c)| (c, k, (k, c)))),
+            limit,
+            offset,
+        )
+        .into_iter()
+        .map(|(key, c)| {
+            let k = unpack4(key);
             vec![
                 k[0].to_string(),
                 k[1].to_string(),
                 k[2].to_string(),
                 k[3].to_string(),
-                cnt.to_string(),
+                c.to_string(),
             ]
-        });
+        })
+        .collect();
         return Ok(Some(QueryResult { columns, rows }));
     }
 
-    struct Int4Bucket {
-        k: [i32; 4],
-        count: u64,
-    }
-
-    let mut groups: AHashMap<u128, Int4Bucket> = AHashMap::with_capacity(mask.len() / 4 + 1);
+    let mut groups: AHashMap<u128, u64> = AHashMap::with_capacity(mask.len() / 4 + 1);
     for_each_selected(&mask, row_count, |i| {
-        if let (Ok(key), Ok(a), Ok(b0), Ok(c), Ok(d)) = (
-            pack4(table, &exprs, i),
-            eval_int_key(table, &exprs[0], i),
-            eval_int_key(table, &exprs[1], i),
-            eval_int_key(table, &exprs[2], i),
-            eval_int_key(table, &exprs[3], i),
-        ) {
-            let b = groups.entry(key).or_insert(Int4Bucket {
-                k: [a as i32, b0 as i32, c as i32, d as i32],
-                count: 0,
-            });
-            b.count += 1;
+        if let Ok(key) = pack4(table, &exprs, i) {
+            *groups.entry(key).or_insert(0) += 1;
         }
     });
 
-    let out = groups.into_values().map(|b| {
+    let out = groups.into_iter().map(|(key, count)| {
+        let k = unpack4(key);
         (
-            b.count,
+            count,
             vec![
-                b.k[0].to_string(),
-                b.k[1].to_string(),
-                b.k[2].to_string(),
-                b.k[3].to_string(),
-                b.count.to_string(),
+                k[0].to_string(),
+                k[1].to_string(),
+                k[2].to_string(),
+                k[3].to_string(),
+                count.to_string(),
             ],
         )
     });
@@ -1497,7 +1584,7 @@ fn try_fused_utf8_pair_distinct(
     finish_count_sorted_legacy(parsed, out)
 }
 
-fn group_id_name(expr: &Expr, parsed: &ParsedQuery) -> Result<String> {
+pub(crate) fn group_id_name(expr: &Expr, parsed: &ParsedQuery) -> Result<String> {
     let resolved = resolve_group_expr(expr, &parsed.select_items);
     match &resolved {
         Expr::Identifier(id) => Ok(id.value.clone()),

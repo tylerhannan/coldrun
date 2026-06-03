@@ -55,7 +55,11 @@ fn try_build_mask_dashboard_sparse(
     };
     let mut mask = zones.build_sparse_dashboard_mask(row_count, counter, min_date, max_date);
     for part in parts {
-        if extract_counter_date_range(part).is_some() {
+        if let Some((c, min_d, max_d)) = extract_counter_date_range(part) {
+            narrow_mask_counter_date(table, &mut mask, c, min_d, max_d)?;
+            continue;
+        }
+        if try_narrow_mask_inplace(table, part, &mut mask)? {
             continue;
         }
         let Some(sub) = try_build_mask(table, part, row_count)? else {
@@ -201,6 +205,174 @@ fn compile_fused_pred<'a>(table: &'a Table, expr: &'a Expr) -> Result<FusedPred<
 fn and_masks_inplace(a: &mut [bool], b: &[bool]) {
     for (x, y) in a.iter_mut().zip(b) {
         *x &= *y;
+    }
+}
+
+/// Apply a predicate to `mask` in place (no full-row sub-mask allocation).
+fn try_narrow_mask_inplace(table: &Table, expr: &Expr, mask: &mut [bool]) -> Result<bool> {
+    match expr {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => {
+            let Some(name) = expr_column_name(left) else {
+                return Ok(false);
+            };
+            let Expr::Value(v) = &**right else {
+                return Ok(false);
+            };
+            if is_date_lit(v) {
+                return Ok(false);
+            }
+            let lit = value_as_i64(v)?;
+            let col = table.column(&name)?;
+            narrow_mask_int_cmp(col, mask, lit, BinaryOperator::Eq);
+            Ok(true)
+        }
+        Expr::InList {
+            expr,
+            list,
+            negated: false,
+        } => {
+            let Some(name) = expr_column_name(expr) else {
+                return Ok(false);
+            };
+            let col = table.column(&name)?;
+            let mut lits = Vec::new();
+            for e in list {
+                let Expr::Value(v) = e else {
+                    return Ok(false);
+                };
+                lits.push(value_as_i64(v)?);
+            }
+            narrow_mask_int_in(col, mask, &lits);
+            Ok(true)
+        }
+        Expr::Nested(inner) => try_narrow_mask_inplace(table, inner, mask),
+        _ => Ok(false),
+    }
+}
+
+fn narrow_mask_counter_date(
+    table: &Table,
+    mask: &mut [bool],
+    counter: i32,
+    min_date: i32,
+    max_date: i32,
+) -> Result<()> {
+    let ColumnData::Int32(counters) = table.column("CounterID")? else {
+        return Ok(());
+    };
+    let ColumnData::Date(dates) = table.column("EventDate")? else {
+        return Ok(());
+    };
+    for (i, m) in mask.iter_mut().enumerate() {
+        if !*m {
+            continue;
+        }
+        if counters[i] != counter || dates[i] < min_date || dates[i] > max_date {
+            *m = false;
+        }
+    }
+    Ok(())
+}
+
+fn narrow_mask_int_cmp(col: &ColumnData, mask: &mut [bool], lit: i64, op: BinaryOperator) {
+    match col {
+        ColumnData::Int16(v) => {
+            let lit = lit as i16;
+            for (i, m) in mask.iter_mut().enumerate() {
+                if *m && !int_cmp_i16(v[i], lit, &op) {
+                    *m = false;
+                }
+            }
+        }
+        ColumnData::Int32(v) => {
+            let lit = lit as i32;
+            for (i, m) in mask.iter_mut().enumerate() {
+                if *m && !int_cmp_i32(v[i], lit, &op) {
+                    *m = false;
+                }
+            }
+        }
+        ColumnData::Int64(v) => {
+            for (i, m) in mask.iter_mut().enumerate() {
+                if *m && !int_cmp_i64(v[i], lit, &op) {
+                    *m = false;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn narrow_mask_int_in(col: &ColumnData, mask: &mut [bool], lits: &[i64]) {
+    match col {
+        ColumnData::Int16(v) => {
+            let set: ahash::AHashSet<i16> = lits.iter().map(|&n| n as i16).collect();
+            for (i, m) in mask.iter_mut().enumerate() {
+                if *m && !set.contains(&v[i]) {
+                    *m = false;
+                }
+            }
+        }
+        ColumnData::Int32(v) => {
+            let set: ahash::AHashSet<i32> = lits.iter().map(|&n| n as i32).collect();
+            for (i, m) in mask.iter_mut().enumerate() {
+                if *m && !set.contains(&v[i]) {
+                    *m = false;
+                }
+            }
+        }
+        ColumnData::Int64(v) => {
+            let set: ahash::AHashSet<i64> = lits.iter().copied().collect();
+            for (i, m) in mask.iter_mut().enumerate() {
+                if *m && !set.contains(&v[i]) {
+                    *m = false;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+#[inline]
+fn int_cmp_i16(v: i16, lit: i16, op: &BinaryOperator) -> bool {
+    match op {
+        BinaryOperator::Eq => v == lit,
+        BinaryOperator::NotEq => v != lit,
+        BinaryOperator::Gt => v > lit,
+        BinaryOperator::GtEq => v >= lit,
+        BinaryOperator::Lt => v < lit,
+        BinaryOperator::LtEq => v <= lit,
+        _ => false,
+    }
+}
+
+#[inline]
+fn int_cmp_i32(v: i32, lit: i32, op: &BinaryOperator) -> bool {
+    match op {
+        BinaryOperator::Eq => v == lit,
+        BinaryOperator::NotEq => v != lit,
+        BinaryOperator::Gt => v > lit,
+        BinaryOperator::GtEq => v >= lit,
+        BinaryOperator::Lt => v < lit,
+        BinaryOperator::LtEq => v <= lit,
+        _ => false,
+    }
+}
+
+#[inline]
+fn int_cmp_i64(v: i64, lit: i64, op: &BinaryOperator) -> bool {
+    match op {
+        BinaryOperator::Eq => v == lit,
+        BinaryOperator::NotEq => v != lit,
+        BinaryOperator::Gt => v > lit,
+        BinaryOperator::GtEq => v >= lit,
+        BinaryOperator::Lt => v < lit,
+        BinaryOperator::LtEq => v <= lit,
+        _ => false,
     }
 }
 

@@ -66,7 +66,7 @@ If you have `hits.parquet` (or a slice) on disk:
 
 Requires **ClickHouse** in [`clickhouse-local/`](../../clickhouse-local/) (`./scripts/install-clickhouse-local.sh`). Validation compares coldrun output to ClickHouse on the same Parquet file. Details: [`parquet/README.md`](parquet/README.md).
 
-**1M snapshot (warm serve, hot sum):** coldrun **1.32s** vs ClickHouse **2.21s** on the same slice (**0.60×**). See [`compare-hot.md`](parquet-hits-1m/compare-hot.md).
+**1M snapshot (warm serve, hot sum):** coldrun **1.36s** vs ClickHouse **2.14s** on the same slice (**0.63×**). See [`compare-hot.md`](parquet-hits-1m/compare-hot.md).
 
 When you regenerate [`parquet-hits-1m/serve-hot.md`](parquet-hits-1m/serve-hot.md) or [`clickhouse-hot.md`](parquet-hits-1m/clickhouse-hot.md), also refresh [`compare-hot.md`](parquet-hits-1m/compare-hot.md) and summary numbers in [`README.md`](../../README.md), [`PERF.md`](../../PERF.md), [`parquet/README.md`](parquet/README.md), and [`ARCHITECTURE.md`](../../ARCHITECTURE.md).
 

@@ -13,6 +13,7 @@ mod group_fused_q11;
 mod group_fused_q22;
 mod group_fused_q23;
 mod group_fused_q29;
+mod group_fused_q41;
 mod group_fused_q40;
 mod group_fused_q43;
 mod group_near_unique;
