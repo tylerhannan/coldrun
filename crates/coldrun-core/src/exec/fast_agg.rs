@@ -429,7 +429,7 @@ fn count_distinct_col_masked(
             let mut intern = super::utf8_arena::Utf8Intern::with_capacity(4096);
             let mut ids = AHashSet::new();
             for_each_selected(mask, row_count, |i| {
-                ids.insert(intern.intern(&v[i]));
+                ids.insert(intern.intern(v.get(i)));
             });
             Some(ids.len() as u64)
         }

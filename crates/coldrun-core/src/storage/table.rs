@@ -135,12 +135,18 @@ impl Table {
 
         let loaded: Vec<(String, ColumnData)> = if to_load.len() == 1 {
             let name = to_load[0];
-            vec![(name.to_string(), Self::read_column_file(&col_dir, &meta_cols, name)?)]
+            if !meta_cols.iter().any(|c| c.name == name) {
+                Vec::new()
+            } else {
+                vec![(name.to_string(), Self::read_column_file(&col_dir, &meta_cols, name)?)]
+            }
         } else {
             use rayon::prelude::*;
             to_load
                 .par_iter()
-                .map(|&name| {
+                .copied()
+                .filter(|&name| meta_cols.iter().any(|c| c.name == name))
+                .map(|name| {
                     Ok((
                         name.to_string(),
                         Self::read_column_file(&col_dir, &meta_cols, name)?,

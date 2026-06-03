@@ -46,7 +46,7 @@ pub fn try_fused_q29(
     let mut groups: AHashMap<u32, HostAgg> = AHashMap::with_capacity(4096);
 
     for_each_selected(&mask, row_count, |i| {
-        let s = referer[i].as_str();
+        let s = referer.get(i);
         if s.is_empty() {
             return;
         }
@@ -57,7 +57,7 @@ pub fn try_fused_q29(
         b.sum_len += s.len() as u128;
         match &b.min_referer {
             Some(cur) if s >= cur.as_str() => {}
-            _ => b.min_referer = Some(referer[i].clone()),
+            _ => b.min_referer = Some(referer.get(i).to_string()),
         }
     });
 

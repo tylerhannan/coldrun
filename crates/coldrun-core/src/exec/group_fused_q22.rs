@@ -56,7 +56,7 @@ pub fn try_fused_q22(
     };
 
     struct Bucket {
-        min_url: String,
+        min_url_row: u32,
         count: u64,
     }
 
@@ -64,12 +64,12 @@ pub fn try_fused_q22(
     let mut groups: AHashMap<u32, Bucket> = AHashMap::with_capacity(512);
 
     for_each_selected(&mask, row_count, |i| {
-        let pid = intern.intern(&phrases[i]);
-        let url = urls[i].as_str();
+        let pid = intern.intern(phrases.get(i));
+        let url = urls.get(i);
         match groups.get_mut(&pid) {
             Some(b) => {
-                if url < b.min_url.as_str() {
-                    b.min_url = urls[i].clone();
+                if url < urls.get(b.min_url_row as usize) {
+                    b.min_url_row = i as u32;
                 }
                 b.count += 1;
             }
@@ -77,7 +77,7 @@ pub fn try_fused_q22(
                 groups.insert(
                     pid,
                     Bucket {
-                        min_url: urls[i].clone(),
+                        min_url_row: i as u32,
                         count: 1,
                     },
                 );
@@ -93,7 +93,7 @@ pub fn try_fused_q22(
             b.count,
             vec![
                 intern.get(pid).to_string(),
-                b.min_url,
+                urls.get(b.min_url_row as usize).to_string(),
                 b.count.to_string(),
             ],
         )

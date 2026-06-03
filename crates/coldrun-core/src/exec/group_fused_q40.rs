@@ -82,11 +82,11 @@ pub fn try_fused_q40(
         let s = se[i];
         let a = adv[i];
         let sh = if s == 0 && a == 0 {
-            hash_str(referer[i].as_str())
+            hash_str(referer.get(i))
         } else {
             0
         };
-        let dh = hash_str(url[i].as_str());
+        let dh = hash_str(url.get(i));
         topk.inc(Q40Key(t, s, a, sh, dh));
     });
 
@@ -100,12 +100,12 @@ pub fn try_fused_q40(
         let s = se[i];
         let a = adv[i];
         let (sh, src_s) = if s == 0 && a == 0 {
-            let r = referer[i].as_str();
+            let r = referer.get(i);
             (hash_str(r), r)
         } else {
             (0, "")
         };
-        let u = url[i].as_str();
+        let u = url.get(i);
         let key = Q40Key(t, s, a, sh, hash_str(u));
         if !key_set.contains(&key) {
             return;

@@ -19,7 +19,7 @@ struct GroupBucket {
     first_seen: u32,
 }
 
-pub fn execute_grouped(db: &Database, parsed: &ParsedQuery) -> Result<QueryResult> {
+pub fn execute_grouped(db: &mut Database, parsed: &ParsedQuery) -> Result<QueryResult> {
     let table = db.open_table_for_query("hits", parsed)?;
     let row_count = table.row_count() as usize;
 

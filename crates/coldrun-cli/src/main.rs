@@ -77,7 +77,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             let sql = read_sql(sql)?;
-            run_timed(&db, &sql)?;
+            run_timed(&mut db, &sql)?;
         }
         Commands::Serve { listen } => {
             serve(&cli.data_dir, &listen)?;
@@ -101,7 +101,7 @@ fn read_sql(sql: Option<String>) -> anyhow::Result<String> {
     })
 }
 
-fn run_timed(db: &Database, sql: &str) -> anyhow::Result<()> {
+fn run_timed(db: &mut Database, sql: &str) -> anyhow::Result<()> {
     let start = Instant::now();
     let result = execute(db, sql.trim())?;
     let elapsed = start.elapsed();
@@ -120,19 +120,19 @@ fn print_result(result: &QueryResult) {
 }
 
 fn serve(data_dir: &PathBuf, listen: &str) -> anyhow::Result<()> {
-    let db = Database::open(data_dir)?;
+    let mut db = Database::open(data_dir)?;
     let listener = TcpListener::bind(listen)?;
     eprintln!("coldrun listening on {listen} (data_dir={})", data_dir.display());
     for stream in listener.incoming() {
         let mut stream = stream?;
-        if let Err(e) = handle_connection(&db, &mut stream) {
+        if let Err(e) = handle_connection(&mut db, &mut stream) {
             let _ = writeln!(stream, "ERROR: {e}");
         }
     }
     Ok(())
 }
 
-fn handle_connection(db: &Database, stream: &mut TcpStream) -> anyhow::Result<()> {
+fn handle_connection(db: &mut Database, stream: &mut TcpStream) -> anyhow::Result<()> {
     let mut buf = String::new();
     stream.read_to_string(&mut buf)?;
     let sql = buf.trim();

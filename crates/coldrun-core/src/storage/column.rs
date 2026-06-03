@@ -6,6 +6,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::pod::PodStorage;
+use super::utf8_col::{read_utf8_offsets, utf8_str_at, write_utf8_idx_sidecar, Utf8Column};
 use crate::Result;
 
 const MAGIC: &[u8; 4] = b"CRUN";
@@ -29,7 +30,7 @@ pub enum ColumnData {
     Int64(PodStorage<i64>),
     Int32(PodStorage<i32>),
     Int16(PodStorage<i16>),
-    Utf8(Vec<String>),
+    Utf8(Utf8Column),
     Date(PodStorage<i32>),
     Timestamp(PodStorage<i64>),
 }
@@ -100,10 +101,10 @@ impl ColumnData {
         }
     }
 
-    pub fn push_utf8(&mut self, v: String) -> Result<()> {
+    pub fn push_utf8(&mut self, v: &str) -> Result<()> {
         match self {
             Self::Utf8(c) => {
-                c.push(v);
+                c.push_str(v);
                 Ok(())
             }
             _ => Err(crate::Error::msg("type mismatch")),
@@ -130,7 +131,7 @@ impl ColumnData {
             ColumnData::Utf8(v) => {
                 let mut offsets = Vec::with_capacity(v.len());
                 let mut pos = 0usize;
-                for s in v {
+                for s in v.iter() {
                     offsets.push(pos as u32);
                     let bytes = s.as_bytes();
                     let len = bytes.len() as u32;
@@ -168,7 +169,7 @@ impl ColumnData {
 
     pub fn read_file(path: &Path) -> Result<Self> {
         let (col_type, payload) = open_column_payload(path)?;
-        decode_column_payload_typed(&payload, col_type)
+        decode_column_payload_typed(&payload, col_type, Some(path))
     }
 
     /// Read formatted cell strings at row indices without materializing the full column.
@@ -192,7 +193,7 @@ impl ColumnData {
             ColumnData::Int16(v) => v[row].to_string(),
             ColumnData::Date(v) => v[row].to_string(),
             ColumnData::Timestamp(v) => v[row].to_string(),
-            ColumnData::Utf8(v) => v[row].clone(),
+            ColumnData::Utf8(v) => v[row].to_string(),
         }
     }
 
@@ -204,7 +205,7 @@ impl ColumnData {
             (ColumnData::Date(d), ColumnData::Date(s)) => d.extend_from_slice(s),
             (ColumnData::Timestamp(d), ColumnData::Timestamp(s)) => d.extend_from_slice(s),
             (ColumnData::Utf8(d), ColumnData::Utf8(s)) => {
-                d.extend_from_slice(s);
+                d.extend_from(s);
                 Ok(())
             }
             _ => Err(crate::Error::msg("extend_from type mismatch")),
@@ -246,7 +247,7 @@ fn open_column_payload(path: &Path) -> Result<(ColumnType, Vec<u8>)> {
     Ok((col_type, payload))
 }
 
-fn decode_column_payload_typed(payload: &[u8], col_type: ColumnType) -> Result<ColumnData> {
+fn decode_column_payload_typed(payload: &[u8], col_type: ColumnType, col_path: Option<&Path>) -> Result<ColumnData> {
     if payload.len() < 8 {
         return Err(crate::Error::msg("column payload truncated"));
     }
@@ -258,7 +259,17 @@ fn decode_column_payload_typed(payload: &[u8], col_type: ColumnType) -> Result<C
         ColumnType::Int16 => ColumnData::Int16(read_pod_slice(body, count)?),
         ColumnType::Date => ColumnData::Date(read_pod_slice(body, count)?),
         ColumnType::Timestamp => ColumnData::Timestamp(read_pod_slice(body, count)?),
-        ColumnType::Utf8 => ColumnData::Utf8(read_utf8_vec(body, count)?),
+        ColumnType::Utf8 => {
+            let col = if let Some(path) = col_path {
+                Utf8Column::from_body_with_sidecar(body, path)?
+            } else {
+                Utf8Column::from_sequential_body(body)?
+            };
+            if col.len() != count {
+                return Err(crate::Error::msg("utf8 row count mismatch"));
+            }
+            ColumnData::Utf8(col)
+        }
     })
 }
 
@@ -296,13 +307,7 @@ fn format_cell_at(
         ColumnType::Int16 => read_pod_at::<i16>(body, row)?.to_string(),
         ColumnType::Date => read_pod_at::<i32>(body, row)?.to_string(),
         ColumnType::Timestamp => read_pod_at::<i64>(body, row)?.to_string(),
-        ColumnType::Utf8 => {
-            if let Some(offsets) = utf8_offsets {
-                read_utf8_at_offset(body, offsets, row)?
-            } else {
-                read_utf8_at(body, row, count)?
-            }
-        }
+        ColumnType::Utf8 => utf8_str_at(body, utf8_offsets, row, count)?,
     })
 }
 
@@ -328,101 +333,8 @@ fn read_pod_slice<T: Copy>(body: &[u8], count: usize) -> Result<PodStorage<T>> {
     Ok(PodStorage::from_arc(Arc::from(vec.into_boxed_slice())))
 }
 
-fn read_utf8_vec(body: &[u8], count: usize) -> Result<Vec<String>> {
-    let mut strings = Vec::with_capacity(count);
-    let mut pos = 0usize;
-    for _ in 0..count {
-        if pos + 4 > body.len() {
-            return Err(crate::Error::msg("utf8 payload truncated"));
-        }
-        let len = u32::from_le_bytes(body[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        if pos + len > body.len() {
-            return Err(crate::Error::msg("utf8 payload truncated"));
-        }
-        strings.push(
-            String::from_utf8(body[pos..pos + len].to_vec())
-                .map_err(|e| crate::Error::msg(format!("invalid utf8 in column: {e}")))?,
-        );
-        pos += len;
-    }
-    Ok(strings)
-}
-
-fn utf8_idx_path(col_path: &Path) -> std::path::PathBuf {
-    let mut p = col_path.as_os_str().to_os_string();
-    p.push(".idx");
-    std::path::PathBuf::from(p)
-}
-
-fn write_utf8_idx_sidecar(col_path: &Path, offsets: &[u32]) -> Result<()> {
-    let path = utf8_idx_path(col_path);
-    let mut out = Vec::with_capacity(4 + 1 + 8 + offsets.len() * 4);
-    out.extend_from_slice(IDX_MAGIC);
-    out.push(FORMAT_V1);
-    out.extend_from_slice(&(offsets.len() as u64).to_le_bytes());
-    for &off in offsets {
-        out.extend_from_slice(&off.to_le_bytes());
-    }
-    let mut f = File::create(path)?;
-    f.write_all(&out)?;
-    Ok(())
-}
-
-fn read_utf8_offsets(col_path: &Path) -> Option<Vec<u32>> {
-    let path = utf8_idx_path(col_path);
-    let mut f = File::open(path).ok()?;
-    let mut header = [0u8; 13];
-    f.read_exact(&mut header).ok()?;
-    if &header[..4] != IDX_MAGIC || header[4] != FORMAT_V1 {
-        return None;
-    }
-    let count = u64::from_le_bytes(header[5..13].try_into().ok()?) as usize;
-    let mut bytes = vec![0u8; count * 4];
-    f.read_exact(&mut bytes).ok()?;
-    Some(
-        bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-            .collect(),
-    )
-}
-
-fn read_utf8_at_offset(body: &[u8], offsets: &[u32], row: usize) -> Result<String> {
-    let mut pos = *offsets
-        .get(row)
-        .ok_or_else(|| crate::Error::msg("row index out of range"))? as usize;
-    if pos + 4 > body.len() {
-        return Err(crate::Error::msg("utf8 payload truncated"));
-    }
-    let len = u32::from_le_bytes(body[pos..pos + 4].try_into().unwrap()) as usize;
-    pos += 4;
-    if pos + len > body.len() {
-        return Err(crate::Error::msg("utf8 payload truncated"));
-    }
-    String::from_utf8(body[pos..pos + len].to_vec())
-        .map_err(|e| crate::Error::msg(format!("invalid utf8 in column: {e}")))
-}
-
-fn read_utf8_at(body: &[u8], mut row: usize, count: usize) -> Result<String> {
-    let mut pos = 0usize;
-    for _ in 0..count {
-        if pos + 4 > body.len() {
-            return Err(crate::Error::msg("utf8 payload truncated"));
-        }
-        let len = u32::from_le_bytes(body[pos..pos + 4].try_into().unwrap()) as usize;
-        if row == 0 {
-            pos += 4;
-            if pos + len > body.len() {
-                return Err(crate::Error::msg("utf8 payload truncated"));
-            }
-            return String::from_utf8(body[pos..pos + len].to_vec())
-                .map_err(|e| crate::Error::msg(format!("invalid utf8 in column: {e}")));
-        }
-        pos += 4 + len;
-        row -= 1;
-    }
-    Err(crate::Error::msg("row index out of range"))
+fn read_utf8_at(body: &[u8], row: usize, count: usize) -> Result<String> {
+    utf8_str_at(body, None, row, count)
 }
 
 fn parse_col_type(tag: u8) -> Result<ColumnType> {
@@ -448,7 +360,7 @@ pub fn empty_column(ty: ColumnType) -> ColumnData {
         ColumnType::Int64 => ColumnData::Int64(PodStorage::owned_with_capacity(0)),
         ColumnType::Int32 => ColumnData::Int32(PodStorage::owned_with_capacity(0)),
         ColumnType::Int16 => ColumnData::Int16(PodStorage::owned_with_capacity(0)),
-        ColumnType::Utf8 => ColumnData::Utf8(Vec::new()),
+        ColumnType::Utf8 => ColumnData::Utf8(Utf8Column::new()),
         ColumnType::Date => ColumnData::Date(PodStorage::owned_with_capacity(0)),
         ColumnType::Timestamp => ColumnData::Timestamp(PodStorage::owned_with_capacity(0)),
     }

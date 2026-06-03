@@ -202,7 +202,7 @@ pub fn eval_group_key(table: &Table, expr: &Expr, row: usize) -> Result<String> 
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
             let name = expr_column_name(expr).ok_or_else(|| crate::Error::msg("expected column"))?;
             match table.column(&name)? {
-                ColumnData::Utf8(v) => Ok(v[row].clone()),
+                ColumnData::Utf8(v) => Ok(v[row].to_string()),
                 ColumnData::Date(v) => Ok(format_date_days(v[row])),
                 ColumnData::Timestamp(v) => Ok(format_timestamp_micros(v[row])),
                 _ => Ok(eval_i64(table, expr, row)?.to_string()),
@@ -325,7 +325,7 @@ fn cmp_str(left: &str, right: &str, op: &BinaryOperator) -> Result<bool> {
 
 fn col_compare_str(col: &ColumnData, row: usize) -> String {
     match col {
-        ColumnData::Utf8(v) => v[row].clone(),
+        ColumnData::Utf8(v) => v[row].to_string(),
         _ => col_i64_at(col, row).to_string(),
     }
 }
@@ -509,7 +509,7 @@ fn col_i64_at(col: &ColumnData, i: usize) -> i64 {
 
 fn col_utf8_at(col: &ColumnData, i: usize) -> &str {
     match col {
-        ColumnData::Utf8(v) => v[i].as_str(),
+        ColumnData::Utf8(v) => &v[i],
         _ => "",
     }
 }

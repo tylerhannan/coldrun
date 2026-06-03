@@ -4,7 +4,7 @@ use sqlparser::ast::{BinaryOperator, Expr, Value};
 
 use crate::expr::{eval_bool, eval_like_match, parse_date_lit};
 use crate::sql::expr_column_name;
-use crate::storage::{ColumnData, Table};
+use crate::storage::{ColumnData, Table, Utf8Column};
 use crate::Result;
 
 pub fn build_filter_mask(
@@ -84,9 +84,9 @@ fn flatten_and<'a>(expr: &'a Expr) -> Vec<&'a Expr> {
 }
 
 enum FusedPred<'a> {
-    Utf8NeEmpty(&'a [String]),
+    Utf8NeEmpty(&'a Utf8Column),
     Utf8Like {
-        data: &'a [String],
+        data: &'a Utf8Column,
         pattern: String,
         negated: bool,
     },
@@ -98,13 +98,13 @@ enum FusedPred<'a> {
 impl FusedPred<'_> {
     fn eval(&self, row: usize) -> bool {
         match self {
-            FusedPred::Utf8NeEmpty(v) => !v[row].is_empty(),
+            FusedPred::Utf8NeEmpty(v) => !v.get(row).is_empty(),
             FusedPred::Utf8Like {
                 data,
                 pattern,
                 negated,
             } => {
-                let m = eval_like_match(&data[row], pattern);
+                let m = eval_like_match(data.get(row), pattern);
                 if *negated {
                     !m
                 } else {

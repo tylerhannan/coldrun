@@ -263,9 +263,9 @@ fn append_array(col: &mut ColumnData, array: &dyn Array, ty: ColumnType) -> Resu
                     .ok_or_else(|| crate::Error::msg("utf8 downcast failed"))?;
                 for i in 0..a.len() {
                     if a.is_null(i) {
-                        c.push(String::new());
+                        c.push_str("");
                     } else {
-                        c.push(a.value(i).to_string());
+                        c.push_str(a.value(i));
                     }
                 }
             }
@@ -276,9 +276,9 @@ fn append_array(col: &mut ColumnData, array: &dyn Array, ty: ColumnType) -> Resu
                     .ok_or_else(|| crate::Error::msg("large utf8 downcast failed"))?;
                 for i in 0..a.len() {
                     if a.is_null(i) {
-                        c.push(String::new());
+                        c.push_str("");
                     } else {
-                        c.push(a.value(i).to_string());
+                        c.push_str(a.value(i));
                     }
                 }
             }

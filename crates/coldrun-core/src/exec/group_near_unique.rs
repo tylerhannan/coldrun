@@ -159,7 +159,7 @@ fn try_q19(
         rows.push(vec![
             users[i].to_string(),
             minute.to_string(),
-            phrases[i].clone(),
+            phrases[i].to_string(),
             "1".to_string(),
         ]);
     });
@@ -211,7 +211,7 @@ fn try_q35(
             skipped += 1;
             return;
         }
-        rows.push(vec!["1".to_string(), urls[i].clone(), "1".to_string()]);
+        rows.push(vec!["1".to_string(), urls[i].to_string(), "1".to_string()]);
     });
 
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
@@ -298,7 +298,7 @@ fn try_user_searchphrase(
         }
         rows.push(vec![
             users[i].to_string(),
-            phrases[i].clone(),
+            phrases[i].to_string(),
             "1".to_string(),
         ]);
     });
@@ -353,7 +353,7 @@ fn try_single_utf8_count(
             skipped += 1;
             return;
         }
-        rows.push(vec![keys[i].clone(), "1".to_string()]);
+        rows.push(vec![keys[i].to_string(), "1".to_string()]);
     });
 
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
@@ -410,7 +410,7 @@ fn try_utf8_count_distinct_user(
             skipped += 1;
             return;
         }
-        rows.push(vec![keys[i].clone(), "1".to_string()]);
+        rows.push(vec![keys[i].to_string(), "1".to_string()]);
     });
 
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
@@ -475,7 +475,7 @@ fn try_int_utf8_count(
         if let Ok(int_val) = eval_int_key(table, &int_expr, i) {
             rows.push(vec![
                 int_val.to_string(),
-                utf8[i].clone(),
+                utf8[i].to_string(),
                 "1".to_string(),
             ]);
         }
@@ -559,7 +559,7 @@ fn try_int_utf8_count_distinct_user(
         if let Ok(int_val) = eval_int_key(table, &int_expr, i) {
             rows.push(vec![
                 int_val.to_string(),
-                utf8[i].clone(),
+                utf8[i].to_string(),
                 "1".to_string(),
             ]);
         }
@@ -737,8 +737,8 @@ fn try_q22(
             continue;
         }
         rows.push(vec![
-            phrases[i].clone(),
-            urls[i].clone(),
+            phrases[i].to_string(),
+            urls[i].to_string(),
             "1".to_string(),
         ]);
     }
@@ -814,9 +814,9 @@ fn try_q23(
             continue;
         }
         rows.push(vec![
-            phrases[i].clone(),
-            urls[i].clone(),
-            titles[i].clone(),
+            phrases[i].to_string(),
+            urls[i].to_string(),
+            titles[i].to_string(),
             "1".to_string(),
             "1".to_string(),
         ]);

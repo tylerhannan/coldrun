@@ -9,11 +9,11 @@ use super::filter::build_filter_mask;
 use super::scan_fast::try_execute_scan_fast;
 use super::QueryResult;
 
-pub fn execute_scan(db: &Database, parsed: &ParsedQuery) -> Result<QueryResult> {
-    let mut table = db.open_table_for_query("hits", parsed)?;
+pub fn execute_scan(db: &mut Database, parsed: &ParsedQuery) -> Result<QueryResult> {
+    let table = db.open_table_for_query("hits", parsed)?;
     let row_count = table.row_count() as usize;
 
-    if let Some(result) = try_execute_scan_fast(&mut table, parsed, row_count)? {
+    if let Some(result) = try_execute_scan_fast(table, parsed, row_count)? {
         return Ok(result);
     }
 

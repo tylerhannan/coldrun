@@ -8,7 +8,7 @@ Correctness and timing on a streamed slice of real `hits` (not synthetic demo):
 
 | | Coldrun (warm serve, hot) | ClickHouse local (`file()` Parquet) |
 |--|---------------------------|-------------------------------------|
-| **Sum Q1–43** | **2.96s** | **~2.1s** (single CLI run per query, same slice; see note) |
+| **Sum Q1–43** | **1.32s** | **~2.1s** (single CLI run per query, same slice; see note) |
 | **Correctness** | 43/43 vs ClickHouse | reference |
 
 Snapshots: [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) · validation: [`parquet/validation-1m.md`](benchmarks/parquet/validation-1m.md).
@@ -78,6 +78,8 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | **Global COUNT DISTINCT** | Dedicated fast path for int/utf8 columns (Q5–Q6) |
 | **Column-order scan** | `SELECT col ORDER BY col LIMIT` sorts via row indices (Q25–Q26) |
 | **Utf8 offset sidecar** | `.col.idx` per utf8 column for O(1) `read_cells_at` |
+| **Contiguous utf8 in memory** | `Utf8Column` blob + offsets (no per-row `String` on load); zero-copy scan |
+| **Serve table cache** | `Database::cached_hits` keeps loaded columns across warm `serve` queries |
 | **Streaming scan top-K** | Q25/Q26 heap over rows — no full filtered index vector |
 | **Parallel Q24 projection** | `project_rows` loads columns with `rayon` |
 | **Zone EventTime top-K** | Monotonic forward scan + v2 zone prune for ORDER BY EventTime LIMIT |
@@ -124,7 +126,7 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | pass 10 | Utf8 `.col.idx` sidecar, parallel `project_rows`, streaming top-K Q25–26 — [`pass-10.md`](benchmarks/demo-100k/pass-10.md) |
 | pass 11 | Zone EventTime top-K, Q6 ahash DISTINCT, Q23/Q27 scan filters — [`pass-11.md`](benchmarks/demo-100k/pass-11.md) |
 | bench-serve | Warm-server hot snapshots, compare vs `latest.md` — [`serve-hot.md`](benchmarks/demo-100k/serve-hot.md) |
-| parquet 1M | Hash utf8 top-K (Q34/35), Q23 index pass, Q40 two-pass, serve-hot **2.96s** (~1.4× CH) — [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) |
+| parquet 1M | Contiguous utf8 + serve table cache, Q23 single-pass map, serve-hot **1.32s** (~0.63× CH) — [`parquet-hits-1m/serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) |
 
 ## Next (planned)
 

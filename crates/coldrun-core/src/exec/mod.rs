@@ -56,11 +56,11 @@ pub fn col_key(col: &ColumnData, i: usize) -> String {
         ColumnData::Int16(v) => v[i].to_string(),
         ColumnData::Date(v) => format_date_days(v[i]),
         ColumnData::Timestamp(v) => format_timestamp_micros(v[i]),
-        ColumnData::Utf8(v) => v[i].clone(),
+        ColumnData::Utf8(v) => v[i].to_string(),
     }
 }
 
-pub fn execute(db: &Database, sql: &str) -> Result<QueryResult> {
+pub fn execute(db: &mut Database, sql: &str) -> Result<QueryResult> {
     let parsed = parse_query(sql)?;
     if parsed.from_table != "hits" {
         return Err(crate::Error::msg(format!(

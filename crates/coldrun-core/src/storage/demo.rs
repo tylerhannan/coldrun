@@ -115,7 +115,7 @@ pub fn load_demo_hits(db: &mut Database, rows: u64) -> Result<u64> {
                         "Referer" if i % 13 == 0 => format!("https://news.ycombinator.com/item?id={i}"),
                         _ => format!("value-{i}"),
                     };
-                    let _ = c.push(v);
+                    let _ = c.push_str(&v);
                 }
             }
             _ => {}

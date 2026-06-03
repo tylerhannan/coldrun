@@ -7,7 +7,7 @@ use sqlparser::ast::{Expr, Value};
 
 use crate::expr::event_time_minute_of_hour;
 use crate::sql::{expr_column_name, projection_label, ParsedQuery, SelectItemKind};
-use crate::storage::{ColumnData, ColumnType, Table};
+use crate::storage::{ColumnData, ColumnType, Table, Utf8Column};
 use crate::Result;
 
 use super::filter::build_filter_mask;
@@ -730,7 +730,7 @@ fn try_fused_q35(
 
 /// COUNT(*) GROUP BY utf8: hash keys + prune so we do not intern every distinct string (Q34/Q35).
 fn utf8_count_topk_by_hash(
-    data: &[String],
+    data: &Utf8Column,
     mask: Vec<bool>,
     row_count: usize,
     limit: usize,
@@ -742,7 +742,7 @@ fn utf8_count_topk_by_hash(
     let mut topk = super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, 32);
 
     for_each_selected(&mask, row_count, |i| {
-        let s = data[i].as_str();
+        let s = data.get(i);
         let h = hash_str(s);
         topk.inc(h);
         if topk.contains_key(&h) {

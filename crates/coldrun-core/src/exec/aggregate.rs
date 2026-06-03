@@ -218,7 +218,7 @@ fn col_key_from_column(col: &crate::storage::ColumnData, i: usize) -> Result<Str
         ColumnData::Int16(v) => v[i].to_string(),
         ColumnData::Date(v) => format_date_days(v[i]),
         ColumnData::Timestamp(v) => crate::expr::format_timestamp_micros(v[i]),
-        ColumnData::Utf8(v) => v[i].clone(),
+        ColumnData::Utf8(v) => v[i].to_string(),
     })
 }
 

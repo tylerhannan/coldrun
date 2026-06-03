@@ -7,7 +7,7 @@ use sqlparser::ast::{BinaryOperator, Expr, Value};
 use crate::expr::eval_like_match;
 use crate::sql::{expr_column_name, ParsedQuery, SelectItemKind};
 use crate::storage::zones::{ZoneIndex, ZONE_ROWS, ZONE_VERSION_V2};
-use crate::storage::{ColumnData, Table};
+use crate::storage::{ColumnData, Table, Utf8Column};
 use crate::Result;
 
 use super::filter::build_filter_mask;
@@ -80,7 +80,7 @@ fn try_scan_single_order(
                 let col = table.column(sel_name)?;
                 if let ColumnData::Utf8(v) = col {
                     let indices =
-                        streaming_topk_utf8(v, row_count, need, *desc, |i| !v[i].is_empty());
+                        streaming_topk_utf8(v, row_count, need, *desc, |i| !v.get(i).is_empty());
                     return Ok(Some(build_scan_result(proj, col, &indices, parsed)?));
                 }
             }
@@ -129,7 +129,7 @@ fn try_scan_order_different_col(
                         row_count,
                         need,
                         *desc,
-                        |i| !v[i].is_empty(),
+                        |i| !v.get(i).is_empty(),
                         |i| times[i],
                     );
                     return Ok(Some(build_scan_result(proj, sel_col, &indices, parsed)?));
@@ -175,13 +175,13 @@ fn try_scan_two_order(
                         .is_some_and(|z| z.event_time_monotonic_in_row_order())
                     {
                         let mut indices =
-                            forward_scan_until(row_count, need, |i| !v[i].is_empty());
+                            forward_scan_until(row_count, need, |i| !v.get(i).is_empty());
                         indices.sort_by(|&a, &b| {
                             let t = times[a].cmp(&times[b]);
                             if t != std::cmp::Ordering::Equal {
                                 return t;
                             }
-                            v[a].cmp(&v[b])
+                            v.get(a).cmp(v.get(b))
                         });
                         let out_col = table.column(sel_name)?;
                         return Ok(Some(build_scan_result(proj, out_col, &indices, parsed)?));
@@ -426,11 +426,9 @@ fn url_like_pattern(expr: &Expr) -> Result<String> {
     }
 }
 
-fn indices_from_utf8_like(data: &[String], pattern: &str, row_count: usize) -> Vec<usize> {
-    data.iter()
-        .take(row_count)
-        .enumerate()
-        .filter_map(|(i, s)| eval_like_match(s, pattern).then_some(i))
+fn indices_from_utf8_like(data: &Utf8Column, pattern: &str, row_count: usize) -> Vec<usize> {
+    (0..row_count)
+        .filter(|&i| eval_like_match(data.get(i), pattern))
         .collect()
 }
 
@@ -520,9 +518,9 @@ fn sort_indices_by_column(col: &ColumnData, indices: &mut [usize], desc: bool) {
     match col {
         ColumnData::Utf8(v) => {
             if desc {
-                indices.sort_by(|&a, &b| v[b].cmp(&v[a]));
+                indices.sort_by(|&a, &b| v.get(b).cmp(v.get(a)));
             } else {
-                indices.sort_by(|&a, &b| v[a].cmp(&v[b]));
+                indices.sort_by(|&a, &b| v.get(a).cmp(v.get(b)));
             }
         }
         ColumnData::Timestamp(v) | ColumnData::Int64(v) => {
@@ -567,7 +565,7 @@ fn sort_indices_two(
 
 fn cmp_at(col: &ColumnData, a: usize, b: usize, desc: bool) -> std::cmp::Ordering {
     let ord = match col {
-        ColumnData::Utf8(v) => v[a].cmp(&v[b]),
+        ColumnData::Utf8(v) => v.get(a).cmp(v.get(b)),
         ColumnData::Timestamp(v) | ColumnData::Int64(v) => v[a].cmp(&v[b]),
         ColumnData::Int32(v) | ColumnData::Date(v) => v[a].cmp(&v[b]),
         ColumnData::Int16(v) => v[a].cmp(&v[b]),
@@ -697,7 +695,7 @@ fn finish_topk_i64_heap(heap: BinaryHeap<(i64, usize)>, desc: bool) -> Vec<usize
 
 /// Keep the best `need` row indices by utf8 key without materializing the full filtered set.
 fn streaming_topk_utf8(
-    v: &[String],
+    v: &Utf8Column,
     row_count: usize,
     need: usize,
     desc: bool,
@@ -715,9 +713,9 @@ fn streaming_topk_utf8(
             heap.push((i, i));
         } else if let Some(&(worst_idx, _)) = heap.peek() {
             let ord = if desc {
-                v[i].cmp(&v[worst_idx])
+                v.get(i).cmp(v.get(worst_idx))
             } else {
-                v[worst_idx].cmp(&v[i])
+                v.get(worst_idx).cmp(v.get(i))
             };
             if ord == std::cmp::Ordering::Greater {
                 heap.pop();
@@ -727,9 +725,9 @@ fn streaming_topk_utf8(
     }
     let mut indices: Vec<usize> = heap.into_iter().map(|(_, i)| i).collect();
     if desc {
-        indices.sort_by(|&a, &b| v[b].cmp(&v[a]));
+        indices.sort_by(|&a, &b| v.get(b).cmp(v.get(a)));
     } else {
-        indices.sort_by(|&a, &b| v[a].cmp(&v[b]));
+        indices.sort_by(|&a, &b| v.get(a).cmp(v.get(b)));
     }
     indices
 }

@@ -119,18 +119,18 @@ fn key_parts(cols: &[&ColumnData], row: usize) -> (String, Vec<String>) {
     match cols.len() {
         1 => {
             let s = match cols[0] {
-                ColumnData::Utf8(v) => v[row].clone(),
+                ColumnData::Utf8(v) => v[row].to_string(),
                 _ => String::new(),
             };
             (s.clone(), vec![s])
         }
         2 => {
             let a = match cols[0] {
-                ColumnData::Utf8(v) => v[row].clone(),
+                ColumnData::Utf8(v) => v[row].to_string(),
                 _ => String::new(),
             };
             let b = match cols[1] {
-                ColumnData::Utf8(v) => v[row].clone(),
+                ColumnData::Utf8(v) => v[row].to_string(),
                 _ => String::new(),
             };
             (format!("{a}\0{b}"), vec![a, b])
