@@ -61,6 +61,18 @@ impl<K: Hash + Eq + Clone + Ord> StreamingTopK<K> {
         }
     }
 
+    /// Top `(key, count)` pairs by count descending (for a second aggregation pass).
+    pub fn top_entries(self) -> Vec<(K, u64)> {
+        let mut pairs: Vec<(u64, K)> = self.counts.into_iter().map(|(k, c)| (c, k)).collect();
+        pairs.sort_by(|a, b| b.0.cmp(&a.0));
+        pairs
+            .into_iter()
+            .skip(self.offset)
+            .take(self.limit)
+            .map(|(c, k)| (k, c))
+            .collect()
+    }
+
     pub fn finish<T, F>(self, mut row: F) -> Vec<T>
     where
         F: FnMut(K, u64) -> T,

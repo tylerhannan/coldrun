@@ -108,7 +108,7 @@ Per query: stop server → wait until down → `drop_caches` → start → run t
 
 1. **MVP (current):** ingest Parquet → column files; correct results for Q1–Q5 via `coldrun local`.
 2. **Coverage:** all 43 queries correct — demo smoke + **43/43 vs ClickHouse on 1M Parquet** (CI).
-3. **Perf:** PK zones, fused GROUP BY, top-K; **1M hot 3.39s** (~1.6× ClickHouse on same slice).
+3. **Perf:** PK zones, fused GROUP BY, top-K; **1M hot 3.17s** (~1.5× ClickHouse on same slice).
 4. **ClickBench PR:** automated `benchmark.sh`, `results/c6a.4xlarge.json`.
 
 ## Honest tradeoffs (toy framing)

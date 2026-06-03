@@ -63,6 +63,9 @@ pub fn try_execute_group_fused(
     if let Some(r) = try_fused_counter_avg_url_len(table, parsed, row_count)? {
         return Ok(Some(r));
     }
+    if let Some(r) = try_fused_int_pair_count(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
     if let Some(r) = try_fused_int_pair_aggs(table, parsed, row_count)? {
         return Ok(Some(r));
     }
@@ -192,6 +195,81 @@ fn try_fused_region_aggs(
                 b.users.len().to_string(),
             ],
         )
+    });
+    finish_count_sorted_legacy(parsed, out)
+}
+
+/// Two int keys + COUNT(*) only (Q41 URLHash+EventDate, etc.).
+fn try_fused_int_pair_count(
+    table: &Table,
+    parsed: &ParsedQuery,
+    row_count: usize,
+) -> Result<Option<QueryResult>> {
+    if parsed.group_by.len() != 2 {
+        return Ok(None);
+    }
+    if detect_sum_avg_cols(parsed).is_some() {
+        return Ok(None);
+    }
+    if !only_pair_aggs(parsed) || !int_pair_group_keys(table, parsed) {
+        return Ok(None);
+    }
+    let k1 = match group_id_name(&parsed.group_by[0], parsed) {
+        Ok(n) => n,
+        Err(_) => return Ok(None),
+    };
+    let k2 = match group_id_name(&parsed.group_by[1], parsed) {
+        Ok(n) => n,
+        Err(_) => return Ok(None),
+    };
+
+    let c1 = table.column(&k1)?;
+    let c2 = table.column(&k2)?;
+    let ic1 = super::column_slice::as_int_cols(c1).ok_or_else(|| crate::Error::msg("k1"))?;
+    let ic2 = super::column_slice::as_int_cols(c2).ok_or_else(|| crate::Error::msg("k2"))?;
+
+    let Some(mask) = build_mask(table, parsed, row_count)? else {
+        return Ok(empty_result(parsed));
+    };
+
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+
+    if limit < usize::MAX && orders_by_count_desc(parsed) {
+        use super::agg_heap::top_counts_u128_key;
+
+        let mut counts: AHashMap<u128, u64> = AHashMap::with_capacity(mask.len() / 4 + 1);
+        for_each_selected(&mask, row_count, |i| {
+            let key = super::column_slice::pack_pair(ic1, ic2, i);
+            *counts.entry(key).or_insert(0) += 1;
+        });
+
+        let top_keys: Vec<u128> = top_counts_u128_key(
+            counts.iter().map(|(&k, &c)| (c, k, k)),
+            limit,
+            offset,
+        );
+
+        let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+        let rows: Vec<Vec<String>> = top_keys
+            .into_iter()
+            .map(|key| {
+                let (a, bb) = unpack_pair_keys(c1, c2, key);
+                vec![a, bb, counts[&key].to_string()]
+            })
+            .collect();
+        return Ok(Some(QueryResult { columns, rows }));
+    }
+
+    let mut groups: AHashMap<u128, u64> = AHashMap::with_capacity(mask.len() / 4 + 1);
+    for_each_selected(&mask, row_count, |i| {
+        let key = super::column_slice::pack_pair(ic1, ic2, i);
+        *groups.entry(key).or_insert(0) += 1;
+    });
+
+    let out = groups.into_iter().map(|(key, c)| {
+        let (a, bb) = unpack_pair_keys(c1, c2, key);
+        (c, vec![a, bb, c.to_string()])
     });
     finish_count_sorted_legacy(parsed, out)
 }
@@ -375,13 +453,28 @@ fn detect_sum_avg_cols(parsed: &ParsedQuery) -> Option<(String, String)> {
     Some((sum_c?, avg_c?))
 }
 
+fn int_pair_group_keys(table: &Table, parsed: &ParsedQuery) -> bool {
+    parsed.group_by.iter().all(|e| {
+        let Ok(name) = group_id_name(e, parsed) else {
+            return false;
+        };
+        matches!(
+            table.column_type(&name),
+            Some(ColumnType::Int16 | ColumnType::Int32 | ColumnType::Int64 | ColumnType::Date)
+        )
+    })
+}
+
 fn unpack_pair_keys(c1: &ColumnData, c2: &ColumnData, key: u128) -> (String, String) {
-    let a = (key >> 64) as i64;
-    let b = key as i64;
+    let a = (key >> 64) as u64 as i64;
+    let b = key as u64 as i64;
     (format_key(c1, a), format_key(c2, b))
 }
 
-fn format_key(_col: &ColumnData, v: i64) -> String {
+fn format_key(col: &ColumnData, v: i64) -> String {
+    if let ColumnData::Date(_) = col {
+        return crate::expr::format_date_days(v as i32);
+    }
     v.to_string()
 }
 
@@ -516,6 +609,24 @@ fn try_fused_int_utf8_count(
 
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let offset = parsed.offset.unwrap_or(0) as usize;
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+
+    if limit < usize::MAX && orders_by_count_desc(parsed) {
+        let mut intern = super::utf8_arena::Utf8Intern::with_capacity(512);
+        let mut topk =
+            super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, usize::MAX);
+        for_each_selected(&mask, row_count, |i| {
+            if let Ok(ik) = i64_at(ic, i) {
+                let pid = intern.intern(&udata[i]);
+                topk.inc((ik, pid));
+            }
+        });
+        let rows = topk.finish_with_tie_key(
+            |(ik, pid), c| vec![ik.to_string(), intern.get(pid).to_string(), c.to_string()],
+            |(ik, pid)| format!("{:020}\t{}", ik, intern.get(*pid)),
+        );
+        return Ok(Some(QueryResult { columns, rows }));
+    }
 
     let mut groups: AHashMap<(i64, u64), (String, u64, u32)> =
         AHashMap::with_capacity(mask.len() / 4 + 1);
@@ -534,7 +645,6 @@ fn try_fused_int_utf8_count(
         .into_iter()
         .map(|((ik, _), (s, c, fs))| (c, fs, vec![ik.to_string(), s, c.to_string()]))
         .collect();
-    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
     if parsed.order_by.is_empty() {
         let mut sorted: Vec<(u32, Vec<String>)> =
             pairs.into_iter().map(|(_, fs, row)| (fs, row)).collect();
@@ -1026,6 +1136,33 @@ fn try_fused_int4_count(
         return Ok(empty_result(parsed));
     };
 
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+
+    if limit < usize::MAX && orders_by_count_desc(parsed) {
+        let mut samples: AHashMap<u128, [i32; 4]> = AHashMap::with_capacity(limit * 4 + 1);
+        let mut topk =
+            super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, usize::MAX);
+        for_each_selected(&mask, row_count, |i| {
+            if let Ok(key) = pack4(table, &exprs, i) {
+                samples.entry(key).or_insert_with(|| unpack4(key));
+                topk.inc(key);
+            }
+        });
+        let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+        let rows = topk.finish(|key, cnt| {
+            let k = samples[&key];
+            vec![
+                k[0].to_string(),
+                k[1].to_string(),
+                k[2].to_string(),
+                k[3].to_string(),
+                cnt.to_string(),
+            ]
+        });
+        return Ok(Some(QueryResult { columns, rows }));
+    }
+
     struct Int4Bucket {
         k: [i32; 4],
         count: u64,
@@ -1088,6 +1225,16 @@ fn pack4(table: &Table, exprs: &[Expr], row: usize) -> Result<u128> {
         key |= (v as u128) << (32 * i);
     }
     Ok(key)
+}
+
+#[inline]
+fn unpack4(key: u128) -> [i32; 4] {
+    [
+        key as u32 as i32,
+        (key >> 32) as u32 as i32,
+        (key >> 64) as u32 as i32,
+        (key >> 96) as u32 as i32,
+    ]
 }
 
 pub(crate) fn eval_int_key(table: &Table, expr: &Expr, row: usize) -> Result<i64> {

@@ -1,17 +1,44 @@
 //! Q40: dashboard filter + CASE referer src + URL dst + COUNT (no per-row interpreter).
 
-use ahash::AHashMap;
+use std::hash::{Hash, Hasher};
+
+use ahash::{AHashMap, AHasher};
 use sqlparser::ast::Expr;
 
 use crate::sql::{projection_label, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, Table};
 use crate::Result;
 
-use super::agg_heap::top_counts;
+use super::agg_topk::StreamingTopK;
 use super::group_fused::build_mask;
 use super::mask_util::for_each_selected;
-use super::utf8_arena::Utf8Intern;
 use super::QueryResult;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Q40Key(i16, i16, i16, u64, u64);
+
+impl PartialOrd for Q40Key {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Q40Key {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .cmp(&other.0)
+            .then(self.1.cmp(&other.1))
+            .then(self.2.cmp(&other.2))
+            .then(self.3.cmp(&other.3))
+            .then(self.4.cmp(&other.4))
+    }
+}
+
+fn hash_str(s: &str) -> u64 {
+    let mut h = AHasher::default();
+    s.hash(&mut h);
+    h.finish()
+}
 
 pub fn try_fused_q40(
     table: &Table,
@@ -44,42 +71,42 @@ pub fn try_fused_q40(
         }));
     };
 
-    let mut src_intern = Utf8Intern::with_capacity(256);
-    let mut dst_intern = Utf8Intern::with_capacity(256);
-    let empty_src = src_intern.intern("");
-    let mut counts: AHashMap<(i16, i16, i16, u32, u32), u64> = AHashMap::with_capacity(512);
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+
+    let mut samples: AHashMap<Q40Key, (String, String)> = AHashMap::with_capacity(512);
+    let mut topk = StreamingTopK::with_prune_factor(limit, offset, 32);
 
     for_each_selected(&mask, row_count, |i| {
         let t = trafic[i];
         let s = se[i];
         let a = adv[i];
-        let si = if s == 0 && a == 0 {
-            src_intern.intern(referer[i].as_str())
+        let (sh, src_s) = if s == 0 && a == 0 {
+            let r = referer[i].as_str();
+            (hash_str(r), r)
         } else {
-            empty_src
+            (0, "")
         };
-        let di = dst_intern.intern(url[i].as_str());
-        *counts.entry((t, s, a, si, di)).or_insert(0) += 1;
+        let u = url[i].as_str();
+        let dh = hash_str(u);
+        let key = Q40Key(t, s, a, sh, dh);
+        samples.entry(key).or_insert_with(|| (src_s.to_string(), u.to_string()));
+        topk.inc(key);
     });
 
-    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
-    let offset = parsed.offset.unwrap_or(0) as usize;
-    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-
-    let scored = counts.into_iter().map(|((t, s, a, si, di), c)| {
-        (
-            c,
-            vec![
-                t.to_string(),
-                s.to_string(),
-                a.to_string(),
-                src_intern.get(si).to_string(),
-                dst_intern.get(di).to_string(),
-                c.to_string(),
-            ],
-        )
+    let rows = topk.finish(|key, c| {
+        let (src, dst) = &samples[&key];
+        vec![
+            key.0.to_string(),
+            key.1.to_string(),
+            key.2.to_string(),
+            src.clone(),
+            dst.clone(),
+            c.to_string(),
+        ]
     });
-    let rows = top_counts(scored, limit, offset);
+
     Ok(Some(QueryResult { columns, rows }))
 }
 

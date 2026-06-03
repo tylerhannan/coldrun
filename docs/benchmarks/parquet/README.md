@@ -35,17 +35,17 @@ Logs: `logs/benchmarks/validate-*.log`
 ./scripts/measure-parquet.sh data/hits-1m.parquet
 ```
 
-**Latest @ 1M rows:** [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) — coldrun hot sum **3.39s** (Q1–43)  
+**Latest @ 1M rows:** [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) — coldrun hot sum **3.17s** (Q1–43)  
 **Validation:** [`validation-1m.md`](validation-1m.md) — **43/43** vs ClickHouse on same slice.
 
 ### Informal perf vs ClickHouse (same 1M slice, laptop)
 
 | Engine | Protocol | Sum Q1–43 |
 |--------|----------|-----------|
-| **coldrun** | warm `serve`, hot = min(try 2, 3) | **3.39s** |
+| **coldrun** | warm `serve`, hot = min(try 2, 3) | **3.17s** |
 | **ClickHouse** | `clickhouse local`, `file()` Parquet, 1 run/query | **~2.1s** |
 
-Not ClickBench Combined — use for relative tuning only (~**1.6×** coldrun vs ClickHouse on this slice). Largest remaining gaps: Q40, Q23, Q41, Q38.
+Not ClickBench Combined — use for relative tuning only (~**1.5×** coldrun vs ClickHouse on this slice). Largest remaining gaps: Q23, Q40, Q41, Q38.
 
 Stream a slice without the full 15 GB download:
 

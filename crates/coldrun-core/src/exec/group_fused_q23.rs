@@ -1,5 +1,7 @@
 //! Q23: SearchPhrase + MIN(URL) + MIN(Title) + COUNT + COUNT(DISTINCT UserID).
 
+use std::collections::HashSet;
+
 use ahash::AHashMap;
 
 use crate::sql::{projection_label, ParsedQuery, SelectItemKind};
@@ -7,14 +9,19 @@ use crate::storage::{ColumnData, Table};
 use crate::Result;
 
 use super::agg_heap::top_counts;
-use super::group_fused::build_mask;
-use super::mask_util::for_each_selected;
 use super::utf8_arena::Utf8Intern;
 use super::QueryResult;
 
 #[inline]
 fn q23_row_matches(phrases: &[String], urls: &[String], titles: &[String], i: usize) -> bool {
-    !phrases[i].is_empty() && titles[i].contains("Google") && !urls[i].contains(".google.")
+    if phrases[i].is_empty() {
+        return false;
+    }
+    let t = titles[i].as_bytes();
+    if memchr::memmem::find(t, b"Google").is_none() {
+        return false;
+    }
+    !memchr::memmem::find(urls[i].as_bytes(), b".google.").is_some()
 }
 
 pub fn try_fused_q23(
@@ -25,8 +32,7 @@ pub fn try_fused_q23(
     if parsed.group_by.len() != 1 {
         return Ok(None);
     }
-    let gb = &parsed.group_by[0];
-    let sqlparser::ast::Expr::Identifier(id) = gb else {
+    let sqlparser::ast::Expr::Identifier(id) = &parsed.group_by[0] else {
         return Ok(None);
     };
     if id.value != "SearchPhrase" {
@@ -71,14 +77,33 @@ pub fn try_fused_q23(
         users: AHashMap<i64, ()>,
     }
 
-    let mut intern = Utf8Intern::with_capacity(1024);
-    let mut groups: AHashMap<u32, Bucket> = AHashMap::with_capacity(1024);
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
 
-    let mut feed = |i: usize| {
+    let mut intern = Utf8Intern::with_capacity(1024);
+
+    let mut counts: AHashMap<u32, u64> = AHashMap::with_capacity(512);
+    for i in 0..row_count {
         if !q23_row_matches(phrases, urls, titles, i) {
-            return;
+            continue;
         }
         let pid = intern.intern(&phrases[i]);
+        *counts.entry(pid).or_insert(0) += 1;
+    }
+
+    let top_pids: Vec<u32> = top_counts(counts.iter().map(|(&pid, &c)| (c, pid)), limit, offset);
+    let top_set: HashSet<u32> = top_pids.iter().copied().collect();
+
+    let mut groups: AHashMap<u32, Bucket> = AHashMap::with_capacity(top_set.len());
+    for i in 0..row_count {
+        if !q23_row_matches(phrases, urls, titles, i) {
+            continue;
+        }
+        let pid = intern.intern(&phrases[i]);
+        if !top_set.contains(&pid) {
+            continue;
+        }
         let url = urls[i].as_str();
         let title = titles[i].as_str();
         let uid = users[i];
@@ -107,38 +132,22 @@ pub fn try_fused_q23(
                 );
             }
         }
-    };
-
-    if table.demo_near_unique() {
-        for i in 0..row_count {
-            feed(i);
-        }
-    } else if let Some(mask) = build_mask(table, parsed, row_count)? {
-        for_each_selected(&mask, row_count, feed);
-    } else {
-        return Ok(Some(QueryResult {
-            columns: parsed.select_items.iter().map(projection_label).collect(),
-            rows: vec![],
-        }));
     }
 
-    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
-    let offset = parsed.offset.unwrap_or(0) as usize;
-    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-
-    let scored = groups.into_iter().map(|(pid, b)| {
-        (
-            b.count,
+    let rows: Vec<Vec<String>> = top_pids
+        .into_iter()
+        .map(|pid| {
+            let b = &groups[&pid];
             vec![
                 intern.get(pid).to_string(),
-                b.min_url,
-                b.min_title,
+                b.min_url.clone(),
+                b.min_title.clone(),
                 b.count.to_string(),
                 b.users.len().to_string(),
-            ],
-        )
-    });
-    let rows = top_counts(scored, limit, offset);
+            ]
+        })
+        .collect();
+
     Ok(Some(QueryResult { columns, rows }))
 }
 
