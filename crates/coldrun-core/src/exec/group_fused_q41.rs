@@ -1,20 +1,17 @@
-//! Q41: dashboard filter + URLHash/EventDate GROUP BY — single-pass filter+agg (no 1M mask).
+//! Q41: dashboard filter + URLHash/EventDate GROUP BY — columnar scan (no 1M mask).
 
-use ahash::AHashMap;
 use sqlparser::ast::{BinaryOperator, Expr, Value};
 
 use crate::expr::parse_date_lit;
 use crate::sql::{expr_column_name, projection_label, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, Table};
-use crate::storage::zones::ZONE_ROWS;
 use crate::Result;
 
 use super::agg_heap::top_counts_u128_key;
 use super::column_slice;
+use super::group_columnar::columnar_referer_pair_count;
 use super::group_fused::{group_id_name, orders_by_count_desc, unpack_pair_keys};
 use super::QueryResult;
-
-const SHARDS: usize = 256;
 
 struct Q41Pred {
     counter: i32,
@@ -78,63 +75,22 @@ pub fn try_fused_q41(
 
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(10);
     let offset = parsed.offset.unwrap_or(0) as usize;
-    let cap = row_count / (SHARDS * 8).max(1);
-    let mut shards: [AHashMap<u128, u64>; SHARDS] =
-        std::array::from_fn(|_| AHashMap::with_capacity(cap.max(4)));
 
-    if let Some(zones) = table.zones() {
-        let mut row = 0usize;
-        for zone in &zones.zones {
-            let zone_end = (row + ZONE_ROWS).min(row_count);
-            if zone_end <= row {
-                break;
-            }
-            if zone.max_counter >= pred.counter
-                && zone.min_counter <= pred.counter
-                && zone.max_date >= pred.min_date
-                && zone.min_date <= pred.max_date
-            {
-                for i in row..zone_end {
-                    if counters[i] != pred.counter {
-                        continue;
-                    }
-                    let d = dates[i];
-                    if d < pred.min_date || d > pred.max_date {
-                        continue;
-                    }
-                    if refresh[i] != pred.is_refresh || !pred.traffic.contains(&traffic[i]) {
-                        continue;
-                    }
-                    if referer[i] != pred.referer_hash {
-                        continue;
-                    }
-                    let key = column_slice::pack_pair(ic1, ic2, i);
-                    let shard = (key as usize) % SHARDS;
-                    *shards[shard].entry(key).or_insert(0) += 1;
-                }
-            }
-            row = zone_end;
-        }
-    } else {
-        for i in 0..row_count {
-            if counters[i] != pred.counter {
-                continue;
-            }
-            let d = dates[i];
-            if d < pred.min_date || d > pred.max_date {
-                continue;
-            }
-            if refresh[i] != pred.is_refresh || !pred.traffic.contains(&traffic[i]) {
-                continue;
-            }
-            if referer[i] != pred.referer_hash {
-                continue;
-            }
-            let key = column_slice::pack_pair(ic1, ic2, i);
-            let shard = (key as usize) % SHARDS;
-            *shards[shard].entry(key).or_insert(0) += 1;
-        }
-    }
+    let shards = columnar_referer_pair_count(
+        row_count,
+        pred.referer_hash,
+        pred.counter,
+        pred.min_date,
+        pred.max_date,
+        pred.is_refresh,
+        referer,
+        counters,
+        dates,
+        refresh,
+        traffic,
+        ic1,
+        ic2,
+    );
 
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
     let rows: Vec<Vec<String>> = top_counts_u128_key(

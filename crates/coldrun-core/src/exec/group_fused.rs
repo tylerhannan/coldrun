@@ -27,6 +27,9 @@ pub fn try_execute_group_fused(
     if let Some(r) = super::group_fused_q43::try_fused_q43(table, parsed, row_count)? {
         return Ok(Some(r));
     }
+    if let Some(r) = super::group_fused_q36::try_fused_q36(table, parsed, row_count)? {
+        return Ok(Some(r));
+    }
     if let Some(r) = super::group_fused_q41::try_fused_q41(table, parsed, row_count)? {
         return Ok(Some(r));
     }

@@ -132,13 +132,14 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | pass 11 | Zone EventTime top-K, Q6 ahash DISTINCT, Q23/Q27 scan filters — [`pass-11.md`](benchmarks/demo-100k/pass-11.md) |
 | bench-serve | Warm-server hot snapshots, compare vs `latest.md` — [`serve-hot.md`](benchmarks/demo-100k/serve-hot.md) |
 | parquet 1M | Contiguous utf8 + serve cache, Q23 rewrite, serve-hot **1.32s** — [`compare-hot.md`](benchmarks/parquet-hits-1m/compare-hot.md) (0.60× CH **2.21s**) |
+| **Columnar GROUP BY scan** | Q36 ClientIP chunks + Q41 referer-led slices (`group_columnar.rs`) — no 1M bool mask |
 | Q41 / Q36 pass | Single-pass Q41, parallel ClientIP quad, dashboard mask narrow — [`compare-hot.md`](benchmarks/parquet-hits-1m/compare-hot.md) (0.63× CH **2.14s**) |
+| columnar pass | Fused columnar Q36/Q41 — correctness ✓; ~0.22s each unchanged vs hash path |
 
 ## Next (planned)
 
-1. **Q36 / Q41** — close gap vs CH on full-scan / dashboard int GROUP BY (still ~10× on Q41)
-2. **Non-monotonic EventTime** — zone heap merge when row order ≠ time order on full Parquet loads
-3. **ClickBench cloud run** — official Combined score on `c6a.4xlarge`; warm CH server compare there
+1. **ClickBench cloud baseline** — first Combined run on `c6a.4xlarge` (stop optimizing 1M hot sum)
+2. **Q36 / Q41** — only if cloud profile shows same gap; needs vectorized agg not map tuning
 
 ## Honest scope
 
