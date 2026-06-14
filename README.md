@@ -111,7 +111,7 @@ docs/benchmarks/       # committed timing + validation snapshots
 
 1. **Q36 / Q41** — remaining gap vs CH on heavy int GROUP BY (~0.13s each; CH ~0.007–0.018s)
 2. **Scale** — 10M+ slice validation; full 100M only for ClickBench cloud run
-3. **ClickBench PR** — `clickbench/coldrun/benchmark.sh` on `c6a.4xlarge` (warm CH server there)
+3. **ClickBench PR** — `clickbench/coldrun/benchmark.sh` on `c6a.4xlarge` (warm CH server there) — see [`docs/CLOUD-RUN.md`](docs/CLOUD-RUN.md)
 
 Snapshots: [`serve-hot.md`](docs/benchmarks/demo-100k/serve-hot.md) (demo) · [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md) (1M Parquet) · per-query notes [`docs/perf/`](docs/perf/)
 

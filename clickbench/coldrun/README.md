@@ -46,3 +46,5 @@ On a laptop, use synthetic data instead:
 ```
 
 See [`docs/PERF.md`](../../docs/PERF.md) for optimization notes and committed bench snapshots in [`docs/benchmarks/`](../../docs/benchmarks/).
+
+Full **100M cloud run:** [`docs/CLOUD-RUN.md`](../../docs/CLOUD-RUN.md).
