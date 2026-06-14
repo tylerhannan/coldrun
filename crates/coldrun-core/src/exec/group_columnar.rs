@@ -2,20 +2,24 @@
 
 use ahash::AHashMap;
 
+use super::agg_heap::top_counts_u128_key;
+use super::agg_topk::StreamingTopK;
 use super::column_slice::{self, IntCols};
+use super::mask_util::{for_each_selected, mask_is_sparse, selected_indices};
+use super::simd_scan::{for_each_i32_wide, for_each_q41_zone_match};
 
-pub const COUNT_SHARDS: usize = 256;
 const CHUNK: usize = 8192;
+const Q36_PARALLEL_THRESHOLD: usize = 250_000;
+const Q41_PARALLEL_THRESHOLD: usize = 250_000;
+const COUNT_SHARDS: usize = 256;
 
-pub type ShardMaps = [AHashMap<u128, u64>; COUNT_SHARDS];
-
-#[inline]
+#[inline(always)]
 pub fn pack_clientip_quad(ip: i32) -> u128 {
-    let ip = ip as u32;
-    (ip as u128)
-        | ((ip.wrapping_sub(1)) as u128) << 32
-        | ((ip.wrapping_sub(2)) as u128) << 64
-        | ((ip.wrapping_sub(3)) as u128) << 96
+    let u = ip as u32;
+    let w1 = u.wrapping_sub(1) as u128;
+    let w2 = u.wrapping_sub(2) as u128;
+    let w3 = u.wrapping_sub(3) as u128;
+    u as u128 | (w1 << 32) | (w2 << 64) | (w3 << 96)
 }
 
 #[inline]
@@ -28,6 +32,8 @@ pub fn unpack_clientip_quad(key: u128) -> [i32; 4] {
     ]
 }
 
+type ShardMaps = [AHashMap<u128, u64>; COUNT_SHARDS];
+
 #[inline]
 fn empty_shards(cap_hint: usize) -> ShardMaps {
     let cap = (cap_hint / (COUNT_SHARDS * 8)).max(4);
@@ -35,7 +41,7 @@ fn empty_shards(cap_hint: usize) -> ShardMaps {
 }
 
 #[inline]
-pub fn merge_shards(mut a: ShardMaps, mut b: ShardMaps) -> ShardMaps {
+fn merge_shard_maps(mut a: ShardMaps, mut b: ShardMaps) -> ShardMaps {
     for i in 0..COUNT_SHARDS {
         for (k, v) in b[i].drain() {
             *a[i].entry(k).or_insert(0) += v;
@@ -50,19 +56,134 @@ fn shard_add(shards: &mut ShardMaps, key: u128) {
     *shards[shard].entry(key).or_insert(0) += 1;
 }
 
-/// Q36: scan contiguous ClientIP column in cache-friendly chunks.
-pub fn clientip_quad_count(ips: &[i32]) -> ShardMaps {
-    let mut shards = empty_shards(ips.len());
-    for chunk in ips.chunks(CHUNK) {
-        for &ip in chunk {
-            shard_add(&mut shards, pack_clientip_quad(ip));
-        }
-    }
-    shards
+fn merge_global_topk(
+    candidates: impl Iterator<Item = (u128, u64)>,
+    limit: usize,
+    offset: usize,
+) -> Vec<(u128, u64)> {
+    top_counts_u128_key(
+        candidates.map(|(k, c)| (c, k, (k, c))),
+        limit,
+        offset,
+    )
+    .into_iter()
+    .map(|(k, c)| (k, c))
+    .collect()
 }
 
-/// Q41: referer-equality-led column chunks, then remaining dashboard preds.
-pub fn columnar_referer_pair_count(
+fn topk_from_shards(shards: ShardMaps, limit: usize, offset: usize) -> Vec<(u128, u64)> {
+    let need = limit.saturating_add(offset);
+    if need == 0 {
+        return Vec::new();
+    }
+    let mut candidates = Vec::with_capacity(need.saturating_mul(COUNT_SHARDS));
+    for m in shards {
+        if m.is_empty() {
+            continue;
+        }
+        if m.len() <= need {
+            candidates.extend(m);
+        } else {
+            candidates.extend(top_counts_u128_key(
+                m.into_iter().map(|(k, c)| (c, k, (k, c))),
+                need,
+                0,
+            ));
+        }
+    }
+    merge_global_topk(candidates.into_iter(), limit, offset)
+}
+
+fn merge_sharded_streaming_topk(
+    shards: [StreamingTopK<u128>; COUNT_SHARDS],
+    limit: usize,
+    offset: usize,
+) -> Vec<(u128, u64)> {
+    let need = limit.saturating_add(offset);
+    if need == 0 {
+        return Vec::new();
+    }
+    let candidates = shards
+        .into_iter()
+        .flat_map(|s| s.top_n(need))
+        .collect::<Vec<_>>();
+    merge_global_topk(candidates.into_iter(), limit, offset)
+}
+
+fn new_sharded_streaming_topk(limit: usize, offset: usize) -> [StreamingTopK<u128>; COUNT_SHARDS] {
+    std::array::from_fn(|_| StreamingTopK::with_prune_factor(limit, offset, 32))
+}
+
+#[inline]
+fn sharded_streaming_inc(shards: &mut [StreamingTopK<u128>; COUNT_SHARDS], key: u128) {
+    shards[(key as usize) % COUNT_SHARDS].inc(key);
+}
+
+/// Q36: 256-way sharded streaming top-K; parallel exact agg on large scans.
+pub fn clientip_quad_topk(ips: &[i32], limit: usize, offset: usize) -> Vec<(u128, u64)> {
+    if ips.len() >= Q36_PARALLEL_THRESHOLD {
+        clientip_quad_topk_parallel(ips, limit, offset)
+    } else {
+        clientip_quad_topk_serial(ips, limit, offset)
+    }
+}
+
+fn clientip_quad_topk_serial(ips: &[i32], limit: usize, offset: usize) -> Vec<(u128, u64)> {
+    let mut shards = new_sharded_streaming_topk(limit, offset);
+    for chunk in ips.chunks(CHUNK) {
+        clientip_quad_scan_chunk(&mut shards, chunk);
+    }
+    merge_sharded_streaming_topk(shards, limit, offset)
+}
+
+#[inline]
+fn clientip_quad_scan_chunk(shards: &mut [StreamingTopK<u128>; COUNT_SHARDS], chunk: &[i32]) {
+    for_each_i32_wide(chunk, |ip| {
+        sharded_streaming_inc(shards, pack_clientip_quad(ip));
+    });
+}
+
+fn clientip_quad_topk_parallel(ips: &[i32], limit: usize, offset: usize) -> Vec<(u128, u64)> {
+    use rayon::prelude::*;
+
+    let shards = ips
+        .par_chunks(CHUNK)
+        .fold(
+            || new_sharded_streaming_topk(limit, offset),
+            |mut shards, chunk| {
+                clientip_quad_scan_chunk(&mut shards, chunk);
+                shards
+            },
+        )
+        .reduce(
+            || new_sharded_streaming_topk(limit, offset),
+            |mut a, mut b| {
+                for i in 0..COUNT_SHARDS {
+                    let other = std::mem::replace(
+                        &mut b[i],
+                        StreamingTopK::with_prune_factor(limit, offset, 32),
+                    );
+                    a[i].absorb(other);
+                }
+                a
+            },
+        );
+
+    merge_sharded_streaming_topk(shards, limit, offset)
+}
+
+#[inline(always)]
+fn pack_q41_pair(url: i64, date: i32, url_high: bool) -> u128 {
+    if url_high {
+        ((url as u128) << 64) | (date as u32 as u128)
+    } else {
+        ((date as i64 as u128) << 64) | (url as u64 as u128)
+    }
+}
+
+/// Q41 fast path: URLHash + EventDate with inlined filters (no IntCols dispatch).
+pub fn dashboard_q41_topk(
+    zone_ranges: &[(usize, usize)],
     row_count: usize,
     referer_hash: i64,
     counter: i32,
@@ -74,49 +195,51 @@ pub fn columnar_referer_pair_count(
     dates: &[i32],
     refresh: &[i16],
     traffic: &[i16],
-    ic1: IntCols<'_>,
-    ic2: IntCols<'_>,
-) -> ShardMaps {
-    let mut shards = empty_shards(row_count);
-    let mut i = 0usize;
-    while i < row_count {
-        let end = (i + CHUNK).min(row_count);
-        let mut j = i;
-        while j < end {
-            if referer[j] != referer_hash {
-                j += 1;
-                continue;
-            }
-            if counters[j] != counter {
-                j += 1;
-                continue;
-            }
-            let d = dates[j];
-            if d < min_date || d > max_date {
-                j += 1;
-                continue;
-            }
-            if refresh[j] != is_refresh {
-                j += 1;
-                continue;
-            }
-            let t = traffic[j];
-            if t != -1 && t != 6 {
-                j += 1;
-                continue;
-            }
-            let key = column_slice::pack_pair(ic1, ic2, j);
-            shard_add(&mut shards, key);
-            j += 1;
-        }
-        i = end;
+    url_hashes: &[i64],
+    url_high: bool,
+    limit: usize,
+    offset: usize,
+) -> Vec<(u128, u64)> {
+    if row_count >= Q41_PARALLEL_THRESHOLD {
+        dashboard_q41_topk_parallel(
+            zone_ranges,
+            referer_hash,
+            counter,
+            min_date,
+            max_date,
+            is_refresh,
+            referer,
+            counters,
+            dates,
+            refresh,
+            traffic,
+            url_hashes,
+            url_high,
+            limit,
+            offset,
+        )
+    } else {
+        dashboard_q41_topk_serial(
+            zone_ranges,
+            referer_hash,
+            counter,
+            min_date,
+            max_date,
+            is_refresh,
+            referer,
+            counters,
+            dates,
+            refresh,
+            traffic,
+            url_hashes,
+            url_high,
+            limit,
+            offset,
+        )
     }
-    shards
 }
 
-/// Zone-pruned dashboard ranges (used when referer is not selective).
-pub fn columnar_dashboard_pair_count(
-    row_count: usize,
+fn dashboard_q41_topk_serial(
     zone_ranges: &[(usize, usize)],
     referer_hash: i64,
     counter: i32,
@@ -128,12 +251,14 @@ pub fn columnar_dashboard_pair_count(
     dates: &[i32],
     refresh: &[i16],
     traffic: &[i16],
-    ic1: IntCols<'_>,
-    ic2: IntCols<'_>,
-) -> ShardMaps {
-    let mut shards = empty_shards(row_count);
+    url_hashes: &[i64],
+    url_high: bool,
+    limit: usize,
+    offset: usize,
+) -> Vec<(u128, u64)> {
+    let mut shards = new_sharded_streaming_topk(limit, offset);
     for &(start, end) in zone_ranges {
-        scan_dashboard_pair_range(
+        scan_q41_zone_sharded(
             &mut shards,
             start,
             end,
@@ -147,16 +272,77 @@ pub fn columnar_dashboard_pair_count(
             dates,
             refresh,
             traffic,
-            ic1,
-            ic2,
+            url_hashes,
+            url_high,
         );
     }
-    shards
+    merge_sharded_streaming_topk(shards, limit, offset)
+}
+
+fn dashboard_q41_topk_parallel(
+    zone_ranges: &[(usize, usize)],
+    referer_hash: i64,
+    counter: i32,
+    min_date: i32,
+    max_date: i32,
+    is_refresh: i16,
+    referer: &[i64],
+    counters: &[i32],
+    dates: &[i32],
+    refresh: &[i16],
+    traffic: &[i16],
+    url_hashes: &[i64],
+    url_high: bool,
+    limit: usize,
+    offset: usize,
+) -> Vec<(u128, u64)> {
+    use rayon::prelude::*;
+
+    let shards = zone_ranges
+        .par_iter()
+        .fold(
+            || new_sharded_streaming_topk(limit, offset),
+            |mut shards, &(start, end)| {
+                scan_q41_zone_sharded(
+                    &mut shards,
+                    start,
+                    end,
+                    referer_hash,
+                    counter,
+                    min_date,
+                    max_date,
+                    is_refresh,
+                    referer,
+                    counters,
+                    dates,
+                    refresh,
+                    traffic,
+                    url_hashes,
+                    url_high,
+                );
+                shards
+            },
+        )
+        .reduce(
+            || new_sharded_streaming_topk(limit, offset),
+            |mut a, mut b| {
+                for i in 0..COUNT_SHARDS {
+                    let other = std::mem::replace(
+                        &mut b[i],
+                        StreamingTopK::with_prune_factor(limit, offset, 32),
+                    );
+                    a[i].absorb(other);
+                }
+                a
+            },
+        );
+
+    merge_sharded_streaming_topk(shards, limit, offset)
 }
 
 #[inline]
-fn scan_dashboard_pair_range(
-    shards: &mut ShardMaps,
+fn scan_q41_zone_sharded(
+    shards: &mut [StreamingTopK<u128>; COUNT_SHARDS],
     start: usize,
     end: usize,
     referer_hash: i64,
@@ -169,38 +355,88 @@ fn scan_dashboard_pair_range(
     dates: &[i32],
     refresh: &[i16],
     traffic: &[i16],
+    url_hashes: &[i64],
+    url_high: bool,
+) {
+    for_each_q41_zone_match(
+        start,
+        end,
+        referer_hash,
+        counter,
+        min_date,
+        max_date,
+        is_refresh,
+        referer,
+        counters,
+        dates,
+        refresh,
+        traffic,
+        |i| {
+            sharded_streaming_inc(
+                shards,
+                pack_q41_pair(url_hashes[i], dates[i], url_high),
+            );
+        },
+    );
+}
+
+/// Q41 fallback when zone index is unavailable.
+pub fn mask_selected_pair_topk(
+    mask: &[bool],
+    row_count: usize,
     ic1: IntCols<'_>,
     ic2: IntCols<'_>,
-) {
-    let mut i = start;
-    while i < end {
-        let block_end = (i + CHUNK).min(end);
-        while i < block_end {
-            if referer[i] != referer_hash {
-                i += 1;
-                continue;
-            }
-            if counters[i] != counter {
-                i += 1;
-                continue;
-            }
-            let d = dates[i];
-            if d < min_date || d > max_date {
-                i += 1;
-                continue;
-            }
-            if refresh[i] != is_refresh {
-                i += 1;
-                continue;
-            }
-            let t = traffic[i];
-            if t != -1 && t != 6 {
-                i += 1;
-                continue;
-            }
-            let key = column_slice::pack_pair(ic1, ic2, i);
-            shard_add(shards, key);
-            i += 1;
-        }
+    limit: usize,
+    offset: usize,
+) -> Vec<(u128, u64)> {
+    if mask_is_sparse(mask) && row_count >= Q41_PARALLEL_THRESHOLD {
+        mask_selected_pair_topk_parallel(mask, ic1, ic2, limit, offset)
+    } else {
+        mask_selected_pair_topk_serial(mask, row_count, ic1, ic2, limit, offset)
     }
+}
+
+fn mask_selected_pair_topk_serial(
+    mask: &[bool],
+    row_count: usize,
+    ic1: IntCols<'_>,
+    ic2: IntCols<'_>,
+    limit: usize,
+    offset: usize,
+) -> Vec<(u128, u64)> {
+    let mut shards = new_sharded_streaming_topk(limit, offset);
+    for_each_selected(mask, row_count, |i| {
+        sharded_streaming_inc(&mut shards, column_slice::pack_pair(ic1, ic2, i));
+    });
+    merge_sharded_streaming_topk(shards, limit, offset)
+}
+
+fn mask_selected_pair_topk_parallel(
+    mask: &[bool],
+    ic1: IntCols<'_>,
+    ic2: IntCols<'_>,
+    limit: usize,
+    offset: usize,
+) -> Vec<(u128, u64)> {
+    use rayon::prelude::*;
+
+    let indices = selected_indices(mask);
+    let cap = (indices.len() / (COUNT_SHARDS * 2)).max(4);
+    let shards = indices
+        .par_chunks(CHUNK)
+        .fold(
+            || empty_shards(indices.len()),
+            |mut shards, chunk| {
+                for &i in chunk {
+                    shard_add(&mut shards, column_slice::pack_pair(ic1, ic2, i));
+                }
+                shards
+            },
+        )
+        .reduce(
+            || std::array::from_fn(|_| AHashMap::with_capacity(cap)),
+            merge_shard_maps,
+        );
+
+    topk_from_shards(shards, limit, offset)
 }

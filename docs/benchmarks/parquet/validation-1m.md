@@ -35,4 +35,4 @@ COLDRUN_DATA="$PWD/.coldrun-validate-hits-1m_" BENCH_SNAPSHOT_SLUG=parquet-hits-
 
 ## Hot timing (serve, Q1–43)
 
-Snapshot: [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) — hot sum **1.32s** @ 1M rows (~**0.63×** ClickHouse ~2.1s on same slice).
+Snapshot: [`../parquet-hits-1m/serve-hot.md`](../parquet-hits-1m/serve-hot.md) — hot sum **0.84s** @ 1M rows (~**0.62×** ClickHouse **1.34s** on same slice).

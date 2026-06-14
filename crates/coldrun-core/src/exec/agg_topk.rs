@@ -40,6 +40,18 @@ impl<K: Hash + Eq + Clone + Ord> StreamingTopK<K> {
 
     pub fn inc(&mut self, key: K) {
         *self.counts.entry(key).or_insert(0) += 1;
+        self.maybe_prune();
+    }
+
+    /// Merge exact partial counts (safe after parallel fold before global top-K).
+    pub fn absorb(&mut self, other: Self) {
+        for (k, v) in other.counts {
+            *self.counts.entry(k).or_insert(0) += v;
+        }
+        self.maybe_prune();
+    }
+
+    fn maybe_prune(&mut self) {
         let need = self.limit.saturating_add(self.offset);
         if need > 0 && self.counts.len() > need.saturating_mul(self.prune_factor) {
             self.prune();
@@ -67,6 +79,22 @@ impl<K: Hash + Eq + Clone + Ord> StreamingTopK<K> {
         for Reverse((c, k)) in heap {
             self.counts.insert(k, c);
         }
+    }
+
+    /// Top `n` groups by count desc (no offset applied — for sharded merge).
+    pub fn top_n(self, n: usize) -> Vec<(K, u64)> {
+        if n == 0 {
+            return Vec::new();
+        }
+        let mut pairs: Vec<(u64, K)> = self.counts.into_iter().map(|(k, c)| (c, k)).collect();
+        if pairs.len() <= n {
+            pairs.sort_by(|a, b| b.0.cmp(&a.0));
+        } else {
+            pairs.select_nth_unstable_by(n - 1, |a, b| b.0.cmp(&a.0));
+            pairs.truncate(n);
+            pairs.sort_by(|a, b| b.0.cmp(&a.0));
+        }
+        pairs.into_iter().map(|(c, k)| (k, c)).collect()
     }
 
     /// Top `(key, count)` pairs by count descending (for a second aggregation pass).

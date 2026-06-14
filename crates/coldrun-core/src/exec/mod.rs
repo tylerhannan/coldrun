@@ -26,6 +26,7 @@ mod group_sorted;
 mod group_utf8;
 mod having;
 mod simd_count;
+mod simd_scan;
 mod topk;
 mod utf8_arena;
 mod scan;

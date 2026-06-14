@@ -19,7 +19,7 @@ Coldrun is the database under test. It does not run ClickBench for other systems
 | 1. Architecture doc | Done | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | 2. MVP: load `hits`, queries 1–5 | Done | demo + Parquet (dynamic schema) |
 | 3. All 43 queries correct | Done | Demo smoke + **43/43 vs ClickHouse** on 1M Parquet ([`validation-1m.md`](docs/benchmarks/parquet/validation-1m.md)) |
-| 4. Optimize Combined score | In progress | 1M hot sum **1.36s** (0.63× ClickHouse **2.14s**) — [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md) |
+| 4. Optimize Combined score | In progress | 1M hot sum **0.84s** (0.62× ClickHouse **1.34s**) — [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md) |
 | 5. ClickBench PR | Not started | [`clickbench/coldrun/`](clickbench/coldrun/) harness |
 
 ## Prerequisites
@@ -107,9 +107,9 @@ docs/benchmarks/       # committed timing + validation snapshots
 
 **Correctness:** demo @ 100k and 1M Parquet both **43/43** (ClickHouse reference).
 
-**Perf (1M Parquet, warm serve):** hot sum **1.36s** vs ClickHouse **2.14s** (**0.63×**). See [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md).
+**Perf (1M Parquet, warm serve):** hot sum **0.84s** vs ClickHouse **1.34s** (**0.62×**). See [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md).
 
-1. **Q36 / Q41** — remaining gap vs CH on heavy int GROUP BY (~0.22s each; CH ~0.01–0.02s)
+1. **Q36 / Q41** — remaining gap vs CH on heavy int GROUP BY (~0.13s each; CH ~0.007–0.018s)
 2. **Scale** — 10M+ slice validation; full 100M only for ClickBench cloud run
 3. **ClickBench PR** — `clickbench/coldrun/benchmark.sh` on `c6a.4xlarge` (warm CH server there)
 

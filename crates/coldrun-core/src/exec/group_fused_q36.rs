@@ -6,9 +6,8 @@ use crate::sql::{projection_label, ParsedQuery, SelectItemKind};
 use crate::storage::Table;
 use crate::Result;
 
-use super::agg_heap::top_counts_u128_key;
 use super::group::resolve_group_expr;
-use super::group_columnar::{clientip_quad_count, unpack_clientip_quad};
+use super::group_columnar::{clientip_quad_topk, unpack_clientip_quad};
 use super::group_fused::orders_by_count_desc;
 use super::QueryResult;
 
@@ -31,28 +30,22 @@ pub fn try_fused_q36(
 
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(10);
     let offset = parsed.offset.unwrap_or(0) as usize;
-    let shards = clientip_quad_count(&ips[..n]);
+    let entries = clientip_quad_topk(&ips[..n], limit, offset);
 
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-    let rows: Vec<Vec<String>> = top_counts_u128_key(
-        shards
-            .iter()
-            .flat_map(|m| m.iter().map(|(&k, &c)| (c, k, (k, c)))),
-        limit,
-        offset,
-    )
-    .into_iter()
-    .map(|(key, c)| {
-        let k = unpack_clientip_quad(key);
-        vec![
-            k[0].to_string(),
-            k[1].to_string(),
-            k[2].to_string(),
-            k[3].to_string(),
-            c.to_string(),
-        ]
-    })
-    .collect();
+    let rows: Vec<Vec<String>> = entries
+        .into_iter()
+        .map(|(key, c)| {
+            let k = unpack_clientip_quad(key);
+            vec![
+                k[0].to_string(),
+                k[1].to_string(),
+                k[2].to_string(),
+                k[3].to_string(),
+                c.to_string(),
+            ]
+        })
+        .collect();
 
     Ok(Some(QueryResult { columns, rows }))
 }

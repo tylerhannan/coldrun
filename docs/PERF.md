@@ -8,8 +8,8 @@ Correctness and timing on a streamed slice of real `hits` (not synthetic demo):
 
 | | Coldrun (warm serve, hot) | ClickHouse local (`file()` Parquet) |
 |--|---------------------------|-------------------------------------|
-| **Sum Q1–43** | **1.36s** | **2.14s** (3 tries/query, hot = min(2,3), `max_threads=1`) |
-| **Ratio** | **0.63×** ClickHouse | — |
+| **Sum Q1–43** | **0.84s** | **1.34s** (3 tries/query, hot = min(2,3), `max_threads=1`) |
+| **Ratio** | **0.62×** ClickHouse | — |
 | **Correctness** | 43/43 vs ClickHouse | reference |
 
 Snapshots: [`serve-hot.md`](benchmarks/parquet-hits-1m/serve-hot.md) · [`clickhouse-hot.md`](benchmarks/parquet-hits-1m/clickhouse-hot.md) · [`compare-hot.md`](benchmarks/parquet-hits-1m/compare-hot.md) · validation: [`parquet/validation-1m.md`](benchmarks/parquet/validation-1m.md).
@@ -131,10 +131,10 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | pass 10 | Utf8 `.col.idx` sidecar, parallel `project_rows`, streaming top-K Q25–26 — [`pass-10.md`](benchmarks/demo-100k/pass-10.md) |
 | pass 11 | Zone EventTime top-K, Q6 ahash DISTINCT, Q23/Q27 scan filters — [`pass-11.md`](benchmarks/demo-100k/pass-11.md) |
 | bench-serve | Warm-server hot snapshots, compare vs `latest.md` — [`serve-hot.md`](benchmarks/demo-100k/serve-hot.md) |
-| parquet 1M | Contiguous utf8 + serve cache, Q23 rewrite, serve-hot **1.32s** — [`compare-hot.md`](benchmarks/parquet-hits-1m/compare-hot.md) (0.60× CH **2.21s**) |
-| **Columnar GROUP BY scan** | Q36 ClientIP chunks + Q41 referer-led slices (`group_columnar.rs`) — no 1M bool mask |
-| Q41 / Q36 pass | Single-pass Q41, parallel ClientIP quad, dashboard mask narrow — [`compare-hot.md`](benchmarks/parquet-hits-1m/compare-hot.md) (0.63× CH **2.14s**) |
-| columnar pass | Fused columnar Q36/Q41 — correctness ✓; ~0.22s each unchanged vs hash path |
+| parquet 1M | SIMD zone scan, streaming top-K Q36/Q41 — serve-hot **0.84s** — [`compare-hot.md`](benchmarks/parquet-hits-1m/compare-hot.md) (0.62× CH **1.34s**) |
+| **Columnar GROUP BY scan** | Q36 ClientIP chunks + Q41 referer-led slices (`group_columnar.rs`, `simd_scan.rs`) — no 1M bool mask |
+| Q41 / Q36 pass | SIMD referer prefilter, parallel streaming top-K — [`compare-hot.md`](benchmarks/parquet-hits-1m/compare-hot.md) (0.62× CH **1.34s**); Q36 **0.133s**, Q41 **0.131s** |
+| columnar pass | Fused columnar Q36/Q41 — correctness ✓; Q36/Q41 ~0.13s each (was ~0.22s) |
 
 ## Next (planned)
 

@@ -35,15 +35,15 @@ Logs: `logs/benchmarks/validate-*.log`
 ./scripts/measure-parquet.sh data/hits-1m.parquet
 ```
 
-**Latest @ 1M rows:** [`../parquet-hits-1m/compare-hot.md`](../parquet-hits-1m/compare-hot.md) — coldrun hot **1.36s**, ClickHouse **2.14s** (0.63×)  
+**Latest @ 1M rows:** [`../parquet-hits-1m/compare-hot.md`](../parquet-hits-1m/compare-hot.md) — coldrun hot **0.84s**, ClickHouse **1.34s** (0.62×)  
 **Validation:** [`validation-1m.md`](validation-1m.md) — **43/43** vs ClickHouse on same slice.
 
 ### Hot sum vs ClickHouse (same 1M slice, laptop)
 
 | Engine | Protocol | Sum Q1–43 |
 |--------|----------|-----------|
-| **coldrun** | warm `serve`, hot = min(try 2, 3) | **1.32s** ([`serve-hot.md`](../parquet-hits-1m/serve-hot.md)) |
-| **ClickHouse** | `clickhouse local --time`, `file()` Parquet, hot = min(try 2, 3) | **2.21s** ([`clickhouse-hot.md`](../parquet-hits-1m/clickhouse-hot.md)) |
+| **coldrun** | warm `serve`, hot = min(try 2, 3) | **0.84s** ([`serve-hot.md`](../parquet-hits-1m/serve-hot.md)) |
+| **ClickHouse** | `clickhouse local --time`, `file()` Parquet, hot = min(try 2, 3) | **1.34s** ([`clickhouse-hot.md`](../parquet-hits-1m/clickhouse-hot.md)) |
 
 Regenerate side-by-side:
 

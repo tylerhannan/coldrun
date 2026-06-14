@@ -1,4 +1,4 @@
-//! Q41: dashboard filter + URLHash/EventDate GROUP BY — columnar scan (no 1M mask).
+//! Q41: dashboard filter + URLHash/EventDate GROUP BY — zone scan + sharded top-K.
 
 use sqlparser::ast::{BinaryOperator, Expr, Value};
 
@@ -7,9 +7,9 @@ use crate::sql::{expr_column_name, projection_label, ParsedQuery, SelectItemKind
 use crate::storage::{ColumnData, Table};
 use crate::Result;
 
-use super::agg_heap::top_counts_u128_key;
 use super::column_slice;
-use super::group_columnar::columnar_referer_pair_count;
+use super::filter::build_filter_mask;
+use super::group_columnar::{dashboard_q41_topk, mask_selected_pair_topk};
 use super::group_fused::{group_id_name, orders_by_count_desc, unpack_pair_keys};
 use super::QueryResult;
 
@@ -18,7 +18,6 @@ struct Q41Pred {
     min_date: i32,
     max_date: i32,
     is_refresh: i16,
-    traffic: ahash::AHashSet<i16>,
     referer_hash: i64,
 }
 
@@ -75,37 +74,53 @@ pub fn try_fused_q41(
 
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(10);
     let offset = parsed.offset.unwrap_or(0) as usize;
+    let url_high = k1 == "URLHash";
+    let ColumnData::Int64(url_hashes) = table.column("URLHash")? else {
+        return Ok(None);
+    };
 
-    let shards = columnar_referer_pair_count(
-        row_count,
-        pred.referer_hash,
-        pred.counter,
-        pred.min_date,
-        pred.max_date,
-        pred.is_refresh,
-        referer,
-        counters,
-        dates,
-        refresh,
-        traffic,
-        ic1,
-        ic2,
-    );
+    let entries = if let Some(zones) = table.zones() {
+        let ranges = zones.dashboard_matching_ranges(
+            row_count,
+            pred.counter,
+            pred.min_date,
+            pred.max_date,
+        );
+        if ranges.is_empty() {
+            vec![]
+        } else {
+            dashboard_q41_topk(
+                &ranges,
+                row_count,
+                pred.referer_hash,
+                pred.counter,
+                pred.min_date,
+                pred.max_date,
+                pred.is_refresh,
+                referer,
+                counters,
+                dates,
+                refresh,
+                traffic,
+                url_hashes,
+                url_high,
+                limit,
+                offset,
+            )
+        }
+    } else {
+        let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
+        mask_selected_pair_topk(&mask, row_count, ic1, ic2, limit, offset)
+    };
 
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-    let rows: Vec<Vec<String>> = top_counts_u128_key(
-        shards
-            .iter()
-            .flat_map(|m| m.iter().map(|(&k, &c)| (c, k, (k, c)))),
-        limit,
-        offset,
-    )
-    .into_iter()
-    .map(|(key, c)| {
-        let (a, bb) = unpack_pair_keys(c1, c2, key);
-        vec![a, bb, c.to_string()]
-    })
-    .collect();
+    let rows: Vec<Vec<String>> = entries
+        .into_iter()
+        .map(|(key, c)| {
+            let (a, bb) = unpack_pair_keys(c1, c2, key);
+            vec![a, bb, c.to_string()]
+        })
+        .collect();
 
     Ok(Some(QueryResult { columns, rows }))
 }
@@ -144,7 +159,7 @@ fn parse_q41_where(expr: Option<&Expr>) -> Result<Option<Q41Pred>> {
         return Ok(None);
     }
 
-    let (counter, min_date, max_date, is_refresh, traffic, referer_hash) = match (
+    let (counter, min_date, max_date, is_refresh, referer_hash) = match (
         counter,
         min_date,
         max_date,
@@ -153,7 +168,10 @@ fn parse_q41_where(expr: Option<&Expr>) -> Result<Option<Q41Pred>> {
         referer,
     ) {
         (Some(c), Some(min_d), Some(max_d), Some(r), Some(t), Some(ref_h)) => {
-            (c, min_d, max_d, r, t, ref_h)
+            if t.len() != 2 || !t.contains(&-1) || !t.contains(&6) {
+                return Ok(None);
+            }
+            (c, min_d, max_d, r, ref_h)
         }
         _ => return Ok(None),
     };
@@ -163,7 +181,6 @@ fn parse_q41_where(expr: Option<&Expr>) -> Result<Option<Q41Pred>> {
         min_date,
         max_date,
         is_refresh,
-        traffic,
         referer_hash,
     }))
 }
