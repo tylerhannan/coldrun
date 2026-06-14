@@ -154,6 +154,33 @@ impl ZoneIndex {
         )
     }
 
+    /// Row ranges `[start, end)` whose zone min/max may contain the dashboard PK filter.
+    pub fn dashboard_matching_ranges(
+        &self,
+        row_count: usize,
+        counter: i32,
+        min_date: i32,
+        max_date: i32,
+    ) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        let mut row = 0usize;
+        for zone in &self.zones {
+            let zone_end = (row + ZONE_ROWS).min(row_count);
+            if zone_end <= row {
+                break;
+            }
+            if zone.max_counter >= counter
+                && zone.min_counter <= counter
+                && zone.max_date >= min_date
+                && zone.min_date <= max_date
+            {
+                ranges.push((row, zone_end));
+            }
+            row = zone_end;
+        }
+        ranges
+    }
+
     /// Build a sparse mask: only PK-matching dashboard zones are true (faster than all-true + prune).
     pub fn build_sparse_dashboard_mask(
         &self,
