@@ -2,10 +2,10 @@
 
 use ahash::AHashMap;
 
-use super::agg_heap::top_counts_u128_key;
+use super::agg_heap::{top_counts, top_counts_u128_key};
 use super::column_slice::{self, IntCols};
 use super::mask_util::{for_each_selected, mask_is_sparse, selected_indices};
-use super::simd_scan::{for_each_i32_wide, for_each_q41_zone_match};
+use super::simd_scan::for_each_q41_zone_match;
 
 const CHUNK: usize = 8192;
 const Q36_PARALLEL_THRESHOLD: usize = 250_000;
@@ -31,12 +31,29 @@ pub fn unpack_clientip_quad(key: u128) -> [i32; 4] {
     ]
 }
 
+type U32ShardMaps = [AHashMap<u32, u64>; COUNT_SHARDS];
 type ShardMaps = [AHashMap<u128, u64>; COUNT_SHARDS];
+
+#[inline]
+fn empty_u32_shards(cap_hint: usize) -> U32ShardMaps {
+    let cap = (cap_hint / (COUNT_SHARDS * 4)).max(8);
+    std::array::from_fn(|_| AHashMap::with_capacity(cap))
+}
 
 #[inline]
 fn empty_shards(cap_hint: usize) -> ShardMaps {
     let cap = (cap_hint / (COUNT_SHARDS * 8)).max(4);
     std::array::from_fn(|_| AHashMap::with_capacity(cap))
+}
+
+#[inline]
+fn merge_u32_shard_maps(mut a: U32ShardMaps, mut b: U32ShardMaps) -> U32ShardMaps {
+    for i in 0..COUNT_SHARDS {
+        for (k, v) in b[i].drain() {
+            *a[i].entry(k).or_insert(0) += v;
+        }
+    }
+    a
 }
 
 #[inline]
@@ -50,9 +67,54 @@ fn merge_shard_maps(mut a: ShardMaps, mut b: ShardMaps) -> ShardMaps {
 }
 
 #[inline]
+fn u32_shard_add(shards: &mut U32ShardMaps, ip: i32) {
+    let key = ip as u32;
+    let shard = key as usize % COUNT_SHARDS;
+    *shards[shard].entry(key).or_insert(0) += 1;
+}
+
+#[inline]
 fn shard_add(shards: &mut ShardMaps, key: u128) {
     let shard = (key as usize) % COUNT_SHARDS;
     *shards[shard].entry(key).or_insert(0) += 1;
+}
+
+fn merge_global_topk_u32(
+    candidates: impl Iterator<Item = (u32, u64)>,
+    limit: usize,
+    offset: usize,
+) -> Vec<(u32, u64)> {
+    top_counts(
+        candidates.map(|(k, c)| (c, (k, c))),
+        limit,
+        offset,
+    )
+    .into_iter()
+    .map(|(k, c)| (k, c))
+    .collect()
+}
+
+fn topk_from_u32_shards(shards: U32ShardMaps, limit: usize, offset: usize) -> Vec<(u32, u64)> {
+    let need = limit.saturating_add(offset);
+    if need == 0 {
+        return Vec::new();
+    }
+    let mut candidates = Vec::with_capacity(need.saturating_mul(COUNT_SHARDS));
+    for m in shards {
+        if m.is_empty() {
+            continue;
+        }
+        if m.len() <= need {
+            candidates.extend(m);
+        } else {
+            candidates.extend(top_counts(
+                m.into_iter().map(|(k, c)| (c, (k, c))),
+                need,
+                0,
+            ));
+        }
+    }
+    merge_global_topk_u32(candidates.into_iter(), limit, offset)
 }
 
 fn merge_global_topk(
@@ -93,49 +155,89 @@ fn topk_from_shards(shards: ShardMaps, limit: usize, offset: usize) -> Vec<(u128
     merge_global_topk(candidates.into_iter(), limit, offset)
 }
 
-/// Q36: 256-way sharded exact counts; parallel merge on large scans.
+/// Q36: count by ClientIP (u32), 256-way sharded exact agg.
 pub fn clientip_quad_topk(ips: &[i32], limit: usize, offset: usize) -> Vec<(u128, u64)> {
-    if ips.len() >= Q36_PARALLEL_THRESHOLD {
-        clientip_quad_topk_parallel(ips, limit, offset)
+    let entries = if ips.len() >= Q36_PARALLEL_THRESHOLD {
+        clientip_topk_parallel(ips, limit, offset)
     } else {
-        clientip_quad_topk_serial(ips, limit, offset)
-    }
+        clientip_topk_serial(ips, limit, offset)
+    };
+    entries
+        .into_iter()
+        .map(|(ip, c)| (pack_clientip_quad(ip as i32), c))
+        .collect()
 }
 
-fn clientip_quad_topk_serial(ips: &[i32], limit: usize, offset: usize) -> Vec<(u128, u64)> {
-    let mut shards = empty_shards(ips.len());
-    for chunk in ips.chunks(CHUNK) {
-        clientip_quad_scan_chunk(&mut shards, chunk);
-    }
-    topk_from_shards(shards, limit, offset)
+fn clientip_topk_serial(ips: &[i32], limit: usize, offset: usize) -> Vec<(u32, u64)> {
+    let mut shards = empty_u32_shards(ips.len());
+    clientip_scan_chunk(&mut shards, ips);
+    topk_from_u32_shards(shards, limit, offset)
 }
 
 #[inline]
-fn clientip_quad_scan_chunk(shards: &mut ShardMaps, chunk: &[i32]) {
-    for_each_i32_wide(chunk, |ip| {
-        shard_add(shards, pack_clientip_quad(ip));
-    });
+fn clientip_scan_chunk(shards: &mut U32ShardMaps, chunk: &[i32]) {
+    let mut i = 0;
+    let len = chunk.len();
+    while i + 32 <= len {
+        u32_shard_add(shards, chunk[i]);
+        u32_shard_add(shards, chunk[i + 1]);
+        u32_shard_add(shards, chunk[i + 2]);
+        u32_shard_add(shards, chunk[i + 3]);
+        u32_shard_add(shards, chunk[i + 4]);
+        u32_shard_add(shards, chunk[i + 5]);
+        u32_shard_add(shards, chunk[i + 6]);
+        u32_shard_add(shards, chunk[i + 7]);
+        u32_shard_add(shards, chunk[i + 8]);
+        u32_shard_add(shards, chunk[i + 9]);
+        u32_shard_add(shards, chunk[i + 10]);
+        u32_shard_add(shards, chunk[i + 11]);
+        u32_shard_add(shards, chunk[i + 12]);
+        u32_shard_add(shards, chunk[i + 13]);
+        u32_shard_add(shards, chunk[i + 14]);
+        u32_shard_add(shards, chunk[i + 15]);
+        u32_shard_add(shards, chunk[i + 16]);
+        u32_shard_add(shards, chunk[i + 17]);
+        u32_shard_add(shards, chunk[i + 18]);
+        u32_shard_add(shards, chunk[i + 19]);
+        u32_shard_add(shards, chunk[i + 20]);
+        u32_shard_add(shards, chunk[i + 21]);
+        u32_shard_add(shards, chunk[i + 22]);
+        u32_shard_add(shards, chunk[i + 23]);
+        u32_shard_add(shards, chunk[i + 24]);
+        u32_shard_add(shards, chunk[i + 25]);
+        u32_shard_add(shards, chunk[i + 26]);
+        u32_shard_add(shards, chunk[i + 27]);
+        u32_shard_add(shards, chunk[i + 28]);
+        u32_shard_add(shards, chunk[i + 29]);
+        u32_shard_add(shards, chunk[i + 30]);
+        u32_shard_add(shards, chunk[i + 31]);
+        i += 32;
+    }
+    while i < len {
+        u32_shard_add(shards, chunk[i]);
+        i += 1;
+    }
 }
 
-fn clientip_quad_topk_parallel(ips: &[i32], limit: usize, offset: usize) -> Vec<(u128, u64)> {
+fn clientip_topk_parallel(ips: &[i32], limit: usize, offset: usize) -> Vec<(u32, u64)> {
     use rayon::prelude::*;
 
-    let cap = (ips.len() / (COUNT_SHARDS * 2)).max(4);
+    let cap = (ips.len() / (COUNT_SHARDS * 4)).max(8);
     let shards = ips
         .par_chunks(CHUNK)
         .fold(
-            || empty_shards(ips.len()),
+            || empty_u32_shards(ips.len()),
             |mut shards, chunk| {
-                clientip_quad_scan_chunk(&mut shards, chunk);
+                clientip_scan_chunk(&mut shards, chunk);
                 shards
             },
         )
         .reduce(
             || std::array::from_fn(|_| AHashMap::with_capacity(cap)),
-            merge_shard_maps,
+            merge_u32_shard_maps,
         );
 
-    topk_from_shards(shards, limit, offset)
+    topk_from_u32_shards(shards, limit, offset)
 }
 
 #[inline(always)]
@@ -251,6 +353,19 @@ fn dashboard_q41_topk_serial(
     topk_from_shards(shards, limit, offset)
 }
 
+fn zone_subranges(zone_ranges: &[(usize, usize)], chunk: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for &(start, end) in zone_ranges {
+        let mut s = start;
+        while s < end {
+            let e = (s + chunk).min(end);
+            out.push((s, e));
+            s = e;
+        }
+    }
+    out
+}
+
 fn dashboard_q41_topk_parallel(
     zone_ranges: &[(usize, usize)],
     referer_hash: i64,
@@ -270,9 +385,10 @@ fn dashboard_q41_topk_parallel(
 ) -> Vec<(u128, u64)> {
     use rayon::prelude::*;
 
+    let subranges = zone_subranges(zone_ranges, CHUNK);
     let scan_rows = zone_range_rows(zone_ranges);
     let cap = (scan_rows / (COUNT_SHARDS * 2)).max(4);
-    let shards = zone_ranges
+    let shards = subranges
         .par_iter()
         .fold(
             || empty_shards(scan_rows),

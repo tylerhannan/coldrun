@@ -1,6 +1,6 @@
 //! Direct-index GROUP BY for low-cardinality integer keys (no hash table).
 
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashMap;
 
 use sqlparser::ast::Expr;
 
@@ -16,8 +16,6 @@ use super::mask_util::for_each_selected;
 use super::QueryResult;
 
 const MAX_DIRECT_BUCKETS: usize = 65_536;
-const Q9_PARALLEL_THRESHOLD: usize = 250_000;
-const Q9_CHUNK: usize = 8192;
 
 pub fn try_execute_group_direct(
     table: &Table,
@@ -118,124 +116,66 @@ fn try_regionid_count_distinct(
         return Ok(None);
     };
 
-    let region_sets = if parsed.where_expr.is_none() {
-        if row_count >= Q9_PARALLEL_THRESHOLD {
-            regionid_distinct_parallel_no_mask(&regions[..row_count], &users[..row_count])
-        } else {
-            regionid_distinct_serial_no_mask(&regions[..row_count], &users[..row_count])
-        }
+    let counts = if parsed.where_expr.is_none() {
+        regionid_distinct_counts(&regions[..row_count], &users[..row_count], None)
     } else {
         let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
-        if row_count >= Q9_PARALLEL_THRESHOLD {
-            regionid_distinct_parallel_masked(&mask, row_count, &regions, &users)
-        } else {
-            regionid_distinct_serial_masked(&mask, row_count, &regions, &users)
-        }
+        regionid_distinct_counts(&regions[..row_count], &users[..row_count], Some(&mask))
     };
 
-    let out = region_sets
+    let out = counts
         .into_iter()
-        .map(|(r, set)| {
-            let u = set.len() as u64;
-            (u, vec![r.to_string(), u.to_string()])
-        });
+        .map(|(r, u)| (u, vec![r.to_string(), u.to_string()]));
     finish_count_sorted_legacy(parsed, out)
 }
 
-fn regionid_distinct_serial_no_mask(regions: &[i32], users: &[i64]) -> AHashMap<i32, AHashSet<i64>> {
-    let mut map: AHashMap<i32, AHashSet<i64>> = AHashMap::new();
-    for i in 0..regions.len() {
-        let r = regions[i];
-        if r >= 0 {
-            map.entry(r).or_default().insert(users[i]);
-        }
-    }
-    map
-}
-
-fn regionid_distinct_serial_masked(
-    mask: &[bool],
-    row_count: usize,
+/// Sort (RegionID, UserID) and count distinct users per region — faster than per-row hash maps at 100M.
+fn regionid_distinct_counts(
     regions: &[i32],
     users: &[i64],
-) -> AHashMap<i32, AHashSet<i64>> {
-    let mut map: AHashMap<i32, AHashSet<i64>> = AHashMap::new();
-    for_each_selected(mask, row_count, |i| {
-        let r = regions[i];
-        if r >= 0 {
-            map.entry(r).or_default().insert(users[i]);
-        }
-    });
-    map
-}
+    mask: Option<&[bool]>,
+) -> AHashMap<i32, u64> {
+    use rayon::prelude::*;
 
-fn merge_region_sets(
-    mut a: AHashMap<i32, AHashSet<i64>>,
-    b: AHashMap<i32, AHashSet<i64>>,
-) -> AHashMap<i32, AHashSet<i64>> {
-    for (r, set) in b {
-        a.entry(r).or_default().extend(set);
+    let mut pairs: Vec<(i32, i64)> = match mask {
+        None => regions
+            .par_iter()
+            .zip(users.par_iter())
+            .filter_map(|(&r, &u)| (r >= 0).then_some((r, u)))
+            .collect(),
+        Some(mask) => (0..regions.len())
+            .into_par_iter()
+            .filter(|&i| mask.get(i).copied().unwrap_or(false))
+            .filter_map(|i| {
+                let r = regions[i];
+                (r >= 0).then_some((r, users[i]))
+            })
+            .collect(),
+    };
+
+    if pairs.is_empty() {
+        return AHashMap::new();
     }
-    a
-}
 
-fn regionid_distinct_parallel_no_mask(regions: &[i32], users: &[i64]) -> AHashMap<i32, AHashSet<i64>> {
-    use rayon::prelude::*;
+    pairs.par_sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
-    regions
-        .par_chunks(Q9_CHUNK)
-        .zip(users.par_chunks(Q9_CHUNK))
-        .fold(
-            || AHashMap::<i32, AHashSet<i64>>::new(),
-            |mut map, (rs, us)| {
-                for i in 0..rs.len() {
-                    let r = rs[i];
-                    if r >= 0 {
-                        map.entry(r).or_default().insert(us[i]);
-                    }
-                }
-                map
-            },
-        )
-        .reduce(
-            || AHashMap::<i32, AHashSet<i64>>::new(),
-            merge_region_sets,
-        )
-}
-
-fn regionid_distinct_parallel_masked(
-    mask: &[bool],
-    row_count: usize,
-    regions: &[i32],
-    users: &[i64],
-) -> AHashMap<i32, AHashSet<i64>> {
-    use rayon::prelude::*;
-
-    let row_ranges: Vec<(usize, usize)> = (0..row_count)
-        .step_by(Q9_CHUNK)
-        .map(|start| (start, (start + Q9_CHUNK).min(row_count)))
-        .collect();
-
-    row_ranges
-        .par_iter()
-        .fold(
-            || AHashMap::<i32, AHashSet<i64>>::new(),
-            |mut map, &(start, end)| {
-                for i in start..end {
-                    if mask.get(i).copied().unwrap_or(false) {
-                        let r = regions[i];
-                        if r >= 0 {
-                            map.entry(r).or_default().insert(users[i]);
-                        }
-                    }
-                }
-                map
-            },
-        )
-        .reduce(
-            || AHashMap::<i32, AHashSet<i64>>::new(),
-            merge_region_sets,
-        )
+    let mut out = AHashMap::new();
+    let mut i = 0;
+    while i < pairs.len() {
+        let region = pairs[i].0;
+        let mut distinct = 1u64;
+        let mut prev = pairs[i].1;
+        i += 1;
+        while i < pairs.len() && pairs[i].0 == region {
+            if pairs[i].1 != prev {
+                distinct += 1;
+                prev = pairs[i].1;
+            }
+            i += 1;
+        }
+        out.insert(region, distinct);
+    }
+    out
 }
 
 /// Q10: RegionID + SUM(AdvEngineID) + COUNT + AVG(ResolutionWidth) + COUNT DISTINCT UserID.
