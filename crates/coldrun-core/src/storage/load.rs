@@ -243,10 +243,15 @@ fn append_array(col: &mut ColumnData, array: &dyn Array, ty: ColumnType) -> Resu
                     .as_any()
                     .downcast_ref::<Int64Array>()
                     .ok_or_else(|| crate::Error::msg("int64 timestamp downcast failed"))?;
-                for i in 0..a.len() {
-                    let v = if a.is_null(i) { 0 } else { a.value(i) };
-                    let micros = event_time_to_micros(v);
-                    c.push(micros)?;
+                if a.null_count() == 0 {
+                    for &v in a.values() {
+                        c.push(event_time_to_micros(v))?;
+                    }
+                } else {
+                    for i in 0..a.len() {
+                        let v = if a.is_null(i) { 0 } else { a.value(i) };
+                        c.push(event_time_to_micros(v))?;
+                    }
                 }
             }
             other => {
@@ -261,26 +266,14 @@ fn append_array(col: &mut ColumnData, array: &dyn Array, ty: ColumnType) -> Resu
                     .as_any()
                     .downcast_ref::<StringArray>()
                     .ok_or_else(|| crate::Error::msg("utf8 downcast failed"))?;
-                for i in 0..a.len() {
-                    if a.is_null(i) {
-                        c.push_str("");
-                    } else {
-                        c.push_str(a.value(i));
-                    }
-                }
+                c.append_string_array(a);
             }
             DataType::LargeUtf8 => {
                 let a = array
                     .as_any()
                     .downcast_ref::<LargeStringArray>()
                     .ok_or_else(|| crate::Error::msg("large utf8 downcast failed"))?;
-                for i in 0..a.len() {
-                    if a.is_null(i) {
-                        c.push_str("");
-                    } else {
-                        c.push_str(a.value(i));
-                    }
-                }
+                c.append_large_string_array(a);
             }
             other => {
                 return Err(crate::Error::msg(format!("unsupported string type: {other:?}")));
@@ -313,9 +306,15 @@ where
         .as_any()
         .downcast_ref::<A>()
         .ok_or_else(|| crate::Error::msg("array downcast failed"))?;
-    for i in 0..a.len() {
-        let v = if a.is_null(i) { null_default } else { f(a, i) };
-        out.push(v)?;
+    if a.null_count() == 0 {
+        for i in 0..a.len() {
+            out.push(f(a, i))?;
+        }
+    } else {
+        for i in 0..a.len() {
+            let v = if a.is_null(i) { null_default } else { f(a, i) };
+            out.push(v)?;
+        }
     }
     Ok(())
 }

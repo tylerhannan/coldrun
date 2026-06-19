@@ -5,63 +5,145 @@ use std::ops::Index;
 use std::path::Path;
 use std::sync::Arc;
 
+use arrow::array::{Array, LargeStringArray, StringArray};
+
 use crate::Result;
 
 #[derive(Debug, Clone)]
+enum Utf8Storage {
+    Building {
+        body: Vec<u8>,
+        offsets: Vec<u32>,
+    },
+    Frozen {
+        body: Arc<[u8]>,
+        offsets: Arc<[u32]>,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct Utf8Column {
-    body: Arc<[u8]>,
-    offsets: Arc<[u32]>,
+    storage: Utf8Storage,
 }
 
 impl Utf8Column {
     pub fn new() -> Self {
         Self {
-            body: Arc::from([]),
-            offsets: Arc::from([]),
+            storage: Utf8Storage::Building {
+                body: Vec::new(),
+                offsets: Vec::new(),
+            },
         }
     }
 
     pub fn len(&self) -> usize {
-        self.offsets.len()
+        match &self.storage {
+            Utf8Storage::Building { offsets, .. } => offsets.len(),
+            Utf8Storage::Frozen { offsets, .. } => offsets.len(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.offsets.is_empty()
+        self.len() == 0
+    }
+
+    fn body_offsets(&self) -> (&[u8], &[u32]) {
+        match &self.storage {
+            Utf8Storage::Building { body, offsets } => (body, offsets),
+            Utf8Storage::Frozen { body, offsets } => (body, offsets),
+        }
+    }
+
+    fn ensure_building(&mut self) {
+        if matches!(self.storage, Utf8Storage::Frozen { .. }) {
+            let Utf8Storage::Frozen { body, offsets } =
+                std::mem::replace(&mut self.storage, Utf8Storage::building_default())
+            else {
+                unreachable!();
+            };
+            self.storage = Utf8Storage::Building {
+                body: body.to_vec(),
+                offsets: offsets.to_vec(),
+            };
+        }
     }
 
     #[inline]
     pub fn get(&self, row: usize) -> &str {
-        let pos = self.offsets[row] as usize;
-        let len = u32::from_le_bytes(self.body[pos..pos + 4].try_into().unwrap()) as usize;
+        let (body, offsets) = self.body_offsets();
+        let pos = offsets[row] as usize;
+        let len = u32::from_le_bytes(body[pos..pos + 4].try_into().unwrap()) as usize;
         let start = pos + 4;
         let end = start + len;
-        unsafe { std::str::from_utf8_unchecked(&self.body[start..end]) }
+        unsafe { std::str::from_utf8_unchecked(&body[start..end]) }
     }
 
     pub fn push_str(&mut self, s: &str) {
-        let mut body = self.body.to_vec();
-        let mut offsets = self.offsets.to_vec();
+        let Utf8Storage::Building { body, offsets } = &mut self.storage else {
+            self.ensure_building();
+            return self.push_str(s);
+        };
         offsets.push(body.len() as u32);
         let bytes = s.as_bytes();
         body.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         body.extend_from_slice(bytes);
-        self.body = Arc::from(body.into_boxed_slice());
-        self.offsets = Arc::from(offsets.into_boxed_slice());
+    }
+
+    pub fn append_string_array(&mut self, array: &StringArray) {
+        let Utf8Storage::Building { body, offsets } = &mut self.storage else {
+            self.ensure_building();
+            return self.append_string_array(array);
+        };
+        offsets.reserve(array.len());
+        for i in 0..array.len() {
+            offsets.push(body.len() as u32);
+            let bytes = if array.is_null(i) {
+                &[][..]
+            } else {
+                array.value(i).as_bytes()
+            };
+            body.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            body.extend_from_slice(bytes);
+        }
+    }
+
+    pub fn append_large_string_array(&mut self, array: &LargeStringArray) {
+        let Utf8Storage::Building { body, offsets } = &mut self.storage else {
+            self.ensure_building();
+            return self.append_large_string_array(array);
+        };
+        offsets.reserve(array.len());
+        for i in 0..array.len() {
+            offsets.push(body.len() as u32);
+            let bytes = if array.is_null(i) {
+                &[][..]
+            } else {
+                array.value(i).as_bytes()
+            };
+            body.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            body.extend_from_slice(bytes);
+        }
     }
 
     pub fn extend_from(&mut self, other: &Self) {
         if other.is_empty() {
             return;
         }
-        let base = self.body.len();
-        let mut body = self.body.to_vec();
-        body.extend_from_slice(&other.body);
-        let mut offsets = self.offsets.to_vec();
-        for &off in other.offsets.iter() {
+        self.ensure_building();
+        let Utf8Storage::Building {
+            body,
+            offsets,
+        } = &mut self.storage
+        else {
+            unreachable!();
+        };
+        let (other_body, other_offsets) = other.body_offsets();
+        let base = body.len();
+        body.extend_from_slice(other_body);
+        offsets.reserve(other_offsets.len());
+        for &off in other_offsets {
             offsets.push(base as u32 + off);
         }
-        self.body = Arc::from(body.into_boxed_slice());
-        self.offsets = Arc::from(offsets.into_boxed_slice());
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &str> + '_ {
@@ -71,8 +153,10 @@ impl Utf8Column {
     pub fn from_body_with_sidecar(body: &[u8], col_path: &Path) -> Result<Self> {
         if let Some(offsets) = read_utf8_offsets(col_path) {
             return Ok(Self {
-                body: Arc::from(body),
-                offsets: Arc::from(offsets.into_boxed_slice()),
+                storage: Utf8Storage::Frozen {
+                    body: Arc::from(body),
+                    offsets: Arc::from(offsets.into_boxed_slice()),
+                },
             });
         }
         Ok(Self::from_sequential_body(body)?)
@@ -90,9 +174,20 @@ impl Utf8Column {
             }
         }
         Ok(Self {
-            body: Arc::from(body),
-            offsets: Arc::from(offsets.into_boxed_slice()),
+            storage: Utf8Storage::Frozen {
+                body: Arc::from(body),
+                offsets: Arc::from(offsets.into_boxed_slice()),
+            },
         })
+    }
+}
+
+impl Utf8Storage {
+    fn building_default() -> Self {
+        Self::Building {
+            body: Vec::new(),
+            offsets: Vec::new(),
+        }
     }
 }
 
