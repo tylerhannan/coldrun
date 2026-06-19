@@ -95,6 +95,7 @@ impl Database {
             let table = self.cached_hits.as_mut().unwrap();
             match &needed {
                 Some(set) => {
+                    table.retain_columns(set);
                     let names: Vec<&str> = set.iter().map(String::as_str).collect();
                     table.load_columns(&names)?;
                 }

@@ -185,6 +185,12 @@ impl Table {
             .collect()
     }
 
+    /// Drop decoded columns not needed for the current query (warm-serve memory cap).
+    pub fn retain_columns(&mut self, keep: &std::collections::HashSet<String>) {
+        self.columns
+            .retain(|name, _| keep.contains(name));
+    }
+
     /// Project row values at `row_indices` without loading full columns into memory.
     pub fn project_rows(&self, row_indices: &[usize]) -> Result<(Vec<String>, Vec<Vec<String>>)> {
         let names: Vec<String> = self.meta.columns.iter().map(|c| c.name.clone()).collect();

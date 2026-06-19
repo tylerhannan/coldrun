@@ -160,52 +160,52 @@ struct DetailState {
     phrase: String,
 }
 
-fn pass2_top_details(
+fn pass2_phrase_detail(
     phrases: &crate::storage::Utf8Column,
     urls: &crate::storage::Utf8Column,
     titles: &crate::storage::Utf8Column,
     users: &[i64],
     row_count: usize,
-    top: &[(u64, u64)],
-) -> AHashMap<u64, DetailState> {
-    let mut out: AHashMap<u64, DetailState> = AHashMap::with_capacity(top.len());
-    let top_set: AHashSet<u64> = top.iter().map(|(h, _)| *h).collect();
+    phrase_hash: u64,
+) -> DetailState {
+    let mut users_set = AHashSet::new();
+    let mut min_url_row = 0u32;
+    let mut min_title_row = 0u32;
+    let mut phrase = String::new();
+    let mut first = true;
 
     for i in 0..row_count {
         if !q23_row_matches(phrases, urls, titles, i) {
             continue;
         }
-        let h = hash_str(phrases.get(i));
-        if !top_set.contains(&h) {
+        if hash_str(phrases.get(i)) != phrase_hash {
             continue;
         }
-        let uid = users[i];
-        let url = urls.get(i);
-        let title = titles.get(i);
-        match out.get_mut(&h) {
-            Some(d) => {
-                if url < urls.get(d.min_url_row as usize) {
-                    d.min_url_row = i as u32;
-                }
-                if title < titles.get(d.min_title_row as usize) {
-                    d.min_title_row = i as u32;
-                }
-                d.users.insert(uid);
-            }
-            None => {
-                out.insert(
-                    h,
-                    DetailState {
-                        min_url_row: i as u32,
-                        min_title_row: i as u32,
-                        users: AHashSet::from([uid]),
-                        phrase: phrases.get(i).to_string(),
-                    },
-                );
-            }
+        if first {
+            min_url_row = i as u32;
+            min_title_row = i as u32;
+            phrase = phrases.get(i).to_string();
+            users_set.insert(users[i]);
+            first = false;
+            continue;
         }
+        let url = urls.get(i);
+        if url < urls.get(min_url_row as usize) {
+            min_url_row = i as u32;
+        }
+        let title = titles.get(i);
+        if title < titles.get(min_title_row as usize) {
+            min_title_row = i as u32;
+        }
+        users_set.insert(users[i]);
     }
-    out
+
+    DetailState {
+        min_url_row,
+        min_title_row,
+        users: users_set,
+        phrase,
+    }
 }
 
 fn q23_execute(
@@ -228,13 +228,11 @@ fn q23_execute(
         offset,
     );
 
-    let details = pass2_top_details(phrases, urls, titles, users, row_count, &top);
-
     top.into_iter()
         .map(|(h, count)| {
-            let d = &details[&h];
+            let d = pass2_phrase_detail(phrases, urls, titles, users, row_count, h);
             vec![
-                d.phrase.clone(),
+                d.phrase,
                 urls.get(d.min_url_row as usize).to_string(),
                 titles.get(d.min_title_row as usize).to_string(),
                 count.to_string(),

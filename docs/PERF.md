@@ -115,7 +115,7 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | **Column-order scan** | `SELECT col ORDER BY col LIMIT` sorts via row indices (Q25–Q26) |
 | **Utf8 offset sidecar** | `.col.idx` per utf8 column for O(1) `read_cells_at` |
 | **Contiguous utf8 in memory** | `Utf8Column` blob + offsets (no per-row `String` on load); zero-copy scan |
-| **Serve table cache** | `Database::cached_hits` keeps loaded columns across warm `serve` queries |
+| **Serve table cache** | `Database::cached_hits` keeps loaded columns across warm `serve` queries; **evicts** columns not referenced by the current query (`Table::retain_columns`) |
 | **Streaming scan top-K** | Q25/Q26 heap over rows — no full filtered index vector |
 | **Parallel Q24 projection** | `project_rows` loads columns with `rayon` |
 | **Zone EventTime top-K** | Monotonic forward scan + v2 zone prune for ORDER BY EventTime LIMIT |
