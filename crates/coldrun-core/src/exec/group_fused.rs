@@ -262,6 +262,66 @@ where
         .collect()
 }
 
+/// Q18: LIMIT without ORDER BY — only count the first `limit` distinct (user, phrase) groups.
+fn user_phrase_first_groups<F>(
+    user_at: F,
+    phrases: &Utf8Column,
+    mask: &[bool],
+    row_count: usize,
+    limit: usize,
+    offset: usize,
+) -> Vec<Vec<String>>
+where
+    F: Fn(usize) -> i64 + Sync + Copy,
+{
+    use ahash::AHashSet;
+    let mut key_order: Vec<(i64, u64)> = Vec::with_capacity(limit.saturating_add(offset));
+    let mut counts: AHashMap<(i64, u64), u64> = AHashMap::with_capacity(limit);
+    let mut tracked: AHashSet<(i64, u64)> = AHashSet::with_capacity(limit);
+
+    for i in 0..row_count {
+        if !mask.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let key = (user_at(i), hash_str(phrases.get(i)));
+        if tracked.contains(&key) {
+            *counts.get_mut(&key).unwrap() += 1;
+            continue;
+        }
+        if key_order.len() < limit.saturating_add(offset) {
+            key_order.push(key);
+            tracked.insert(key);
+            counts.insert(key, 1);
+        }
+    }
+
+    let phrase_map = resolve_phrases_for_user_hash(
+        &key_order
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|&k| (k, counts[&k]))
+            .collect::<Vec<_>>(),
+        phrases,
+        mask,
+        user_at,
+        row_count,
+    );
+
+    key_order
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|key| {
+            vec![
+                key.0.to_string(),
+                phrase_map[&key].clone(),
+                counts[&key].to_string(),
+            ]
+        })
+        .collect()
+}
+
 #[derive(Default, Clone)]
 struct UserMinuteUtf8Agg {
     count: u64,
@@ -1059,6 +1119,11 @@ fn try_fused_int_utf8_count(
 
     if limit < usize::MAX && orders_by_count_desc(parsed) {
         let rows = user_phrase_topk_by_sort(user_at, udata, &mask, row_count, limit, offset);
+        return Ok(Some(QueryResult { columns, rows }));
+    }
+
+    if limit < usize::MAX && parsed.order_by.is_empty() {
+        let rows = user_phrase_first_groups(user_at, udata, &mask, row_count, limit, offset);
         return Ok(Some(QueryResult { columns, rows }));
     }
 
