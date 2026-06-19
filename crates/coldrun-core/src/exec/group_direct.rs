@@ -1,6 +1,6 @@
 //! Direct-index GROUP BY for low-cardinality integer keys (no hash table).
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 
 use sqlparser::ast::Expr;
 
@@ -16,6 +16,8 @@ use super::mask_util::for_each_selected;
 use super::QueryResult;
 
 const MAX_DIRECT_BUCKETS: usize = 65_536;
+const Q9_PARALLEL_THRESHOLD: usize = 250_000;
+const Q9_CHUNK: usize = 8192;
 
 pub fn try_execute_group_direct(
     table: &Table,
@@ -109,9 +111,6 @@ fn try_regionid_count_distinct(
         return Ok(None);
     }
 
-    let Some(bucket_n) = direct_bucket_count(table, "RegionID", row_count) else {
-        return Ok(None);
-    };
     let ColumnData::Int32(regions) = table.column("RegionID")? else {
         return Ok(None);
     };
@@ -119,28 +118,124 @@ fn try_regionid_count_distinct(
         return Ok(None);
     };
 
-    let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
-    let mut buckets: Vec<AHashMap<i64, ()>> = (0..bucket_n).map(|_| AHashMap::new()).collect();
-
-    for_each_selected(&mask, row_count, |i| {
-        let r = regions[i];
-        if r >= 0 {
-            let idx = r as usize;
-            if idx < bucket_n {
-                buckets[idx].insert(users[i], ());
-            }
+    let region_sets = if parsed.where_expr.is_none() {
+        if row_count >= Q9_PARALLEL_THRESHOLD {
+            regionid_distinct_parallel_no_mask(&regions[..row_count], &users[..row_count])
+        } else {
+            regionid_distinct_serial_no_mask(&regions[..row_count], &users[..row_count])
         }
-    });
+    } else {
+        let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
+        if row_count >= Q9_PARALLEL_THRESHOLD {
+            regionid_distinct_parallel_masked(&mask, row_count, &regions, &users)
+        } else {
+            regionid_distinct_serial_masked(&mask, row_count, &regions, &users)
+        }
+    };
 
-    let out = buckets
+    let out = region_sets
         .into_iter()
-        .enumerate()
-        .filter(|(_, set)| !set.is_empty())
         .map(|(r, set)| {
             let u = set.len() as u64;
             (u, vec![r.to_string(), u.to_string()])
         });
     finish_count_sorted_legacy(parsed, out)
+}
+
+fn regionid_distinct_serial_no_mask(regions: &[i32], users: &[i64]) -> AHashMap<i32, AHashSet<i64>> {
+    let mut map: AHashMap<i32, AHashSet<i64>> = AHashMap::new();
+    for i in 0..regions.len() {
+        let r = regions[i];
+        if r >= 0 {
+            map.entry(r).or_default().insert(users[i]);
+        }
+    }
+    map
+}
+
+fn regionid_distinct_serial_masked(
+    mask: &[bool],
+    row_count: usize,
+    regions: &[i32],
+    users: &[i64],
+) -> AHashMap<i32, AHashSet<i64>> {
+    let mut map: AHashMap<i32, AHashSet<i64>> = AHashMap::new();
+    for_each_selected(mask, row_count, |i| {
+        let r = regions[i];
+        if r >= 0 {
+            map.entry(r).or_default().insert(users[i]);
+        }
+    });
+    map
+}
+
+fn merge_region_sets(
+    mut a: AHashMap<i32, AHashSet<i64>>,
+    b: AHashMap<i32, AHashSet<i64>>,
+) -> AHashMap<i32, AHashSet<i64>> {
+    for (r, set) in b {
+        a.entry(r).or_default().extend(set);
+    }
+    a
+}
+
+fn regionid_distinct_parallel_no_mask(regions: &[i32], users: &[i64]) -> AHashMap<i32, AHashSet<i64>> {
+    use rayon::prelude::*;
+
+    regions
+        .par_chunks(Q9_CHUNK)
+        .zip(users.par_chunks(Q9_CHUNK))
+        .fold(
+            || AHashMap::<i32, AHashSet<i64>>::new(),
+            |mut map, (rs, us)| {
+                for i in 0..rs.len() {
+                    let r = rs[i];
+                    if r >= 0 {
+                        map.entry(r).or_default().insert(us[i]);
+                    }
+                }
+                map
+            },
+        )
+        .reduce(
+            || AHashMap::<i32, AHashSet<i64>>::new(),
+            merge_region_sets,
+        )
+}
+
+fn regionid_distinct_parallel_masked(
+    mask: &[bool],
+    row_count: usize,
+    regions: &[i32],
+    users: &[i64],
+) -> AHashMap<i32, AHashSet<i64>> {
+    use rayon::prelude::*;
+
+    let row_ranges: Vec<(usize, usize)> = (0..row_count)
+        .step_by(Q9_CHUNK)
+        .map(|start| (start, (start + Q9_CHUNK).min(row_count)))
+        .collect();
+
+    row_ranges
+        .par_iter()
+        .fold(
+            || AHashMap::<i32, AHashSet<i64>>::new(),
+            |mut map, &(start, end)| {
+                for i in start..end {
+                    if mask.get(i).copied().unwrap_or(false) {
+                        let r = regions[i];
+                        if r >= 0 {
+                            map.entry(r).or_default().insert(users[i]);
+                        }
+                    }
+                }
+                map
+            },
+        )
+        .reduce(
+            || AHashMap::<i32, AHashSet<i64>>::new(),
+            merge_region_sets,
+        )
 }
 
 /// Q10: RegionID + SUM(AdvEngineID) + COUNT + AVG(ResolutionWidth) + COUNT DISTINCT UserID.
