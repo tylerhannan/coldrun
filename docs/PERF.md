@@ -52,7 +52,7 @@ For 100M rows, hash maps with millions of groups or per-group `AHashSet` OOM or 
 | Q14 | `group_fused.rs` | Sort `(phrase_hash, UserID)` for COUNT DISTINCT |
 | Q17, Q19 | `group_fused.rs` | Sort user+phrase / user+minute+phrase pairs |
 | Q18 | `group_fused.rs` | Track first LIMIT distinct groups only (no ORDER BY) |
-| Q23 | `group_fused_q23.rs` | Two-phase: sort `(phrase_hash, UserID)`, then min URL/title for top 10 |
+| Q23 | `group_fused_q23.rs` | Sharded count map + top-10 detail pass (ClickHouse Aggregator pattern) |
 | Q36 | `group_columnar.rs` | Sort ClientIP u32 values |
 | Q41 | `group_columnar.rs` | Collect zone-matching URLHash+EventDate keys, sort, top-K |
 
@@ -98,8 +98,8 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | **Demo near-unique GROUP BY** | `TableMeta::demo_near_unique` + O(limit) scan (`group_near_unique.rs`, Q19/Q35/Q36) |
 | **Q40 CASE fused** | Dashboard + CASE referer + URL without interpreter (`group_fused_q40.rs`) |
 | **Sharded int-pair GROUP BY** | 256-way shards for Q31–33 (`column_slice.rs`) |
-| **Fused SearchPhrase aggs** | Q11/Q22 (`group_fused_q11.rs`, `group_fused_q22.rs`); Q23 two-phase sort (`group_fused_q23.rs`) |
-| **Sort-based top-K @ 100M** | `agg_sort.rs` — Q9, Q14, Q17–Q19, Q23, Q36, Q41 (see above) |
+| **Fused SearchPhrase aggs** | Q11/Q22 (`group_fused_q11.rs`, `group_fused_q22.rs`); Q23 sharded incremental agg (`group_fused_q23.rs`) |
+| **Sort-based top-K @ 100M** | `agg_sort.rs` — Q9, Q14, Q17–Q19, Q36, Q41 (see above) |
 | **Streaming top-K scaffold** | `agg_topk.rs` wired for utf8 COUNT with LIMIT (non-demo) |
 | **`PodStorage` / Arc numerics** | Shared POD buffers after column read (`storage/pod.rs`) |
 | **Q24 partial sort** | `select_nth_unstable` for ORDER BY EventTime LIMIT scan |
@@ -172,6 +172,7 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | **100M sort agg** | `4965730` — `agg_sort.rs`; Q36/Q41 sort paths; Q17/Q19 sort top-K |
 | **100M Q14/Q18** | `0a65cf6` — Q14 hash-only distinct sort; Q18 first-LIMIT-groups |
 | **100M Q23 fix** | `18d7641` — two-phase sort; fixes OOM kill at Q23 on 32 GiB VM |
+| **100M Q23 v2** | sharded count-only pass 1 + top-10 detail pass 2 (ClickHouse Aggregator pattern; no O(rows) buffer on warm cache) |
 
 ## Next (planned)
 

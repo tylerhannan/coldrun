@@ -230,8 +230,8 @@ scp -i ~/Downloads/coldrun-bench.pem \
 | `benchmark.sh` hangs | `./check`, stale `serve.pid`, `tmux attach -t official` |
 | Cold times flat vs hot | `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'` must succeed |
 | Query wrong vs CH | Re-run validate on 1M slice; fix before trusting 100M |
-| Bench dies at Q23 | Pre-`18d7641`: OOM from per-phrase `AHashSet` — pull `18d7641+`, rebuild, restart with `--from 23` |
-| Serve RSS >25 GiB on Q23 | Same — use sort-based two-phase path in `group_fused_q23.rs` |
+| Bench dies at Q23 | Pre-fix: OOM — pair materialization or per-phrase sets on ~30 GiB warm cache. Pull latest, rebuild, `--from 23` |
+| Serve RSS >25 GiB on Q23 | Warm serve holds all loaded columns; Q23 must use O(distinct groups) agg, not O(rows) sort buffer |
 | `ls *.col` count 0 | Columns live under `$COLDRUN_DATA/hits/columns/`, not data root |
 | tmux session gone | Job died — check end of `/data/bench-*.log` for error |
 

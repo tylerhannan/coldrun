@@ -1,8 +1,10 @@
 //! Q23: SearchPhrase + MIN(URL) + MIN(Title) + COUNT + COUNT(DISTINCT UserID).
 //!
-//! Phase 1: collect matching `(phrase_hash, user)` pairs, sort, top-K by count + distinct users.
-//! Phase 2: second scan for top phrases only — MIN(URL), MIN(Title), resolve phrase text.
-//! Avoids per-group `AHashSet` maps that OOM on 100M rows.
+//! ClickHouse-style incremental aggregation — never materialize O(rows) `(phrase, user)` pairs
+//! on top of the warm-serve column cache (~30 GiB on 100M).
+//!
+//! Pass 1: sharded `phrase_hash → count` only (O(distinct phrases)).
+//! Pass 2: rescan; for top-K phrase hashes only — `UniqExact`-style user sets + MIN via row indices.
 
 use ahash::{AHashMap, AHashSet};
 
@@ -10,11 +12,12 @@ use crate::sql::{projection_label, ParsedQuery, SelectItemKind};
 use crate::storage::{ColumnData, Table};
 use crate::Result;
 
-use super::agg_sort::sorted_topk_phrase_user_counts;
+use super::agg_heap::top_counts;
 use super::group_fused::hash_str;
 use super::QueryResult;
 
 const PARALLEL_THRESHOLD: usize = 250_000;
+const COUNT_SHARDS: usize = 256;
 
 #[inline]
 fn q23_row_matches(
@@ -88,10 +91,121 @@ pub fn try_fused_q23(
     Ok(Some(QueryResult { columns, rows }))
 }
 
-struct MinBucket {
+type CountShards = [AHashMap<u64, u64>; COUNT_SHARDS];
+
+#[inline]
+fn shard_idx(h: u64) -> usize {
+    h as usize % COUNT_SHARDS
+}
+
+fn merge_count_shards(mut a: CountShards, mut b: CountShards) -> CountShards {
+    for i in 0..COUNT_SHARDS {
+        for (k, v) in b[i].drain() {
+            *a[i].entry(k).or_insert(0) += v;
+        }
+    }
+    a
+}
+
+fn pass1_phrase_counts(
+    phrases: &crate::storage::Utf8Column,
+    urls: &crate::storage::Utf8Column,
+    titles: &crate::storage::Utf8Column,
+    row_count: usize,
+) -> AHashMap<u64, u64> {
+    use rayon::prelude::*;
+
+    let cap = (row_count / (COUNT_SHARDS * 8)).max(4);
+    let shards = if row_count >= PARALLEL_THRESHOLD {
+        (0..row_count)
+            .into_par_iter()
+            .fold(
+                || std::array::from_fn(|_| AHashMap::with_capacity(cap)),
+                |mut shards, i| {
+                    if q23_row_matches(phrases, urls, titles, i) {
+                        let h = hash_str(phrases.get(i));
+                        *shards[shard_idx(h)].entry(h).or_insert(0) += 1;
+                    }
+                    shards
+                },
+            )
+            .reduce(
+                || std::array::from_fn(|_| AHashMap::new()),
+                merge_count_shards,
+            )
+    } else {
+        let mut shards: CountShards = std::array::from_fn(|_| AHashMap::with_capacity(cap));
+        for i in 0..row_count {
+            if q23_row_matches(phrases, urls, titles, i) {
+                let h = hash_str(phrases.get(i));
+                *shards[shard_idx(h)].entry(h).or_insert(0) += 1;
+            }
+        }
+        shards
+    };
+
+    let mut merged = AHashMap::with_capacity(cap * COUNT_SHARDS);
+    for mut m in shards {
+        for (k, v) in m.drain() {
+            *merged.entry(k).or_insert(0) += v;
+        }
+    }
+    merged
+}
+
+struct DetailState {
+    min_url_row: u32,
+    min_title_row: u32,
+    users: AHashSet<i64>,
     phrase: String,
-    min_url: String,
-    min_title: String,
+}
+
+fn pass2_top_details(
+    phrases: &crate::storage::Utf8Column,
+    urls: &crate::storage::Utf8Column,
+    titles: &crate::storage::Utf8Column,
+    users: &[i64],
+    row_count: usize,
+    top: &[(u64, u64)],
+) -> AHashMap<u64, DetailState> {
+    let mut out: AHashMap<u64, DetailState> = AHashMap::with_capacity(top.len());
+    let top_set: AHashSet<u64> = top.iter().map(|(h, _)| *h).collect();
+
+    for i in 0..row_count {
+        if !q23_row_matches(phrases, urls, titles, i) {
+            continue;
+        }
+        let h = hash_str(phrases.get(i));
+        if !top_set.contains(&h) {
+            continue;
+        }
+        let uid = users[i];
+        let url = urls.get(i);
+        let title = titles.get(i);
+        match out.get_mut(&h) {
+            Some(d) => {
+                if url < urls.get(d.min_url_row as usize) {
+                    d.min_url_row = i as u32;
+                }
+                if title < titles.get(d.min_title_row as usize) {
+                    d.min_title_row = i as u32;
+                }
+                d.users.insert(uid);
+            }
+            None => {
+                out.insert(
+                    h,
+                    DetailState {
+                        min_url_row: i as u32,
+                        min_title_row: i as u32,
+                        users: AHashSet::from([uid]),
+                        phrase: phrases.get(i).to_string(),
+                    },
+                );
+            }
+        }
+    }
+    out
 }
 
 fn q23_execute(
@@ -103,82 +217,31 @@ fn q23_execute(
     limit: usize,
     offset: usize,
 ) -> Vec<Vec<String>> {
-    let mut pairs = collect_phrase_user_pairs(phrases, urls, titles, users, row_count);
-    if pairs.is_empty() {
+    let counts = pass1_phrase_counts(phrases, urls, titles, row_count);
+    if counts.is_empty() {
         return Vec::new();
     }
 
-    let top = sorted_topk_phrase_user_counts(&mut pairs, limit, offset);
-    drop(pairs);
+    let top: Vec<(u64, u64)> = top_counts(
+        counts.into_iter().map(|(h, c)| (c, (h, c))),
+        limit,
+        offset,
+    );
 
-    let top_hashes: AHashSet<u64> = top.iter().map(|(h, _, _)| *h).collect();
-    let mut mins: AHashMap<u64, MinBucket> = AHashMap::with_capacity(top.len());
-
-    for i in 0..row_count {
-        if !q23_row_matches(phrases, urls, titles, i) {
-            continue;
-        }
-        let h = hash_str(phrases.get(i));
-        if !top_hashes.contains(&h) {
-            continue;
-        }
-        let url = urls.get(i);
-        let title = titles.get(i);
-        mins
-            .entry(h)
-            .and_modify(|b| {
-                if url < b.min_url.as_str() {
-                    b.min_url = url.to_string();
-                }
-                if title < b.min_title.as_str() {
-                    b.min_title = title.to_string();
-                }
-            })
-            .or_insert(MinBucket {
-                phrase: phrases.get(i).to_string(),
-                min_url: url.to_string(),
-                min_title: title.to_string(),
-            });
-    }
+    let details = pass2_top_details(phrases, urls, titles, users, row_count, &top);
 
     top.into_iter()
-        .map(|(h, count, distinct)| {
-            let b = &mins[&h];
+        .map(|(h, count)| {
+            let d = &details[&h];
             vec![
-                b.phrase.clone(),
-                b.min_url.clone(),
-                b.min_title.clone(),
+                d.phrase.clone(),
+                urls.get(d.min_url_row as usize).to_string(),
+                titles.get(d.min_title_row as usize).to_string(),
                 count.to_string(),
-                distinct.to_string(),
+                d.users.len().to_string(),
             ]
         })
         .collect()
-}
-
-fn collect_phrase_user_pairs(
-    phrases: &crate::storage::Utf8Column,
-    urls: &crate::storage::Utf8Column,
-    titles: &crate::storage::Utf8Column,
-    users: &[i64],
-    row_count: usize,
-) -> Vec<(u64, i64)> {
-    use rayon::prelude::*;
-
-    if row_count >= PARALLEL_THRESHOLD {
-        (0..row_count)
-            .into_par_iter()
-            .filter(|&i| q23_row_matches(phrases, urls, titles, i))
-            .map(|i| (hash_str(phrases.get(i)), users[i]))
-            .collect()
-    } else {
-        let mut v = Vec::new();
-        for i in 0..row_count {
-            if q23_row_matches(phrases, urls, titles, i) {
-                v.push((hash_str(phrases.get(i)), users[i]));
-            }
-        }
-        v
-    }
 }
 
 fn is_col(e: &sqlparser::ast::Expr, name: &str) -> bool {
