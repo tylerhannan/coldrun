@@ -182,6 +182,86 @@ where
     }
 }
 
+fn collect_user_phrase_pairs<F>(
+    user_at: F,
+    phrases: &Utf8Column,
+    mask: &[bool],
+    row_count: usize,
+) -> Vec<(i64, u64)>
+where
+    F: Fn(usize) -> i64 + Sync,
+{
+    use rayon::prelude::*;
+    if row_count >= FUSED_PARALLEL_THRESHOLD {
+        (0..row_count)
+            .into_par_iter()
+            .filter(|&i| mask.get(i).copied().unwrap_or(false))
+            .map(|i| (user_at(i), hash_str(phrases.get(i))))
+            .collect()
+    } else {
+        let mut v = Vec::new();
+        for i in 0..row_count {
+            if mask.get(i).copied().unwrap_or(false) {
+                v.push((user_at(i), hash_str(phrases.get(i))));
+            }
+        }
+        v
+    }
+}
+
+fn resolve_phrases_for_user_hash<F>(
+    top: &[((i64, u64), u64)],
+    phrases: &Utf8Column,
+    mask: &[bool],
+    user_at: F,
+    row_count: usize,
+) -> AHashMap<(i64, u64), String>
+where
+    F: Fn(usize) -> i64,
+{
+    use ahash::AHashSet;
+    let need: AHashSet<(i64, u64)> = top.iter().map(|(k, _)| *k).collect();
+    let mut out = AHashMap::with_capacity(need.len());
+    for i in 0..row_count {
+        if !mask.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let key = (user_at(i), hash_str(phrases.get(i)));
+        if need.contains(&key) && !out.contains_key(&key) {
+            out.insert(key, phrases.get(i).to_string());
+            if out.len() == need.len() {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn user_phrase_topk_by_sort<F>(
+    user_at: F,
+    phrases: &Utf8Column,
+    mask: &[bool],
+    row_count: usize,
+    limit: usize,
+    offset: usize,
+) -> Vec<Vec<String>>
+where
+    F: Fn(usize) -> i64 + Sync + Copy,
+{
+    let mut pairs = collect_user_phrase_pairs(user_at, phrases, mask, row_count);
+    let top = super::agg_sort::sorted_topk_user_phrase(&mut pairs, limit, offset);
+    let phrase_map = resolve_phrases_for_user_hash(&top, phrases, mask, user_at, row_count);
+    top.into_iter()
+        .map(|((user, hash), c)| {
+            vec![
+                user.to_string(),
+                phrase_map[&(user, hash)].clone(),
+                c.to_string(),
+            ]
+        })
+        .collect()
+}
+
 #[derive(Default, Clone)]
 struct UserMinuteUtf8Agg {
     count: u64,
@@ -257,6 +337,89 @@ fn parallel_user_minute_utf8_agg(
     }
 }
 
+fn collect_user_minute_phrase_triples(
+    users: &[i64],
+    minutes: impl Fn(usize) -> i64 + Sync,
+    phrases: &Utf8Column,
+    mask: &[bool],
+    row_count: usize,
+) -> Vec<(i64, i64, u64)> {
+    use rayon::prelude::*;
+    if row_count >= FUSED_PARALLEL_THRESHOLD {
+        (0..row_count)
+            .into_par_iter()
+            .filter(|&i| mask.get(i).copied().unwrap_or(false))
+            .map(|i| {
+                (
+                    users[i],
+                    minutes(i),
+                    hash_str(phrases.get(i)),
+                )
+            })
+            .collect()
+    } else {
+        let mut v = Vec::new();
+        for i in 0..row_count {
+            if mask.get(i).copied().unwrap_or(false) {
+                v.push((users[i], minutes(i), hash_str(phrases.get(i))));
+            }
+        }
+        v
+    }
+}
+
+fn resolve_phrases_for_user_minute_hash(
+    top: &[((i64, i64, u64), u64)],
+    users: &[i64],
+    minutes: impl Fn(usize) -> i64 + Sync,
+    phrases: &Utf8Column,
+    mask: &[bool],
+    row_count: usize,
+) -> AHashMap<(i64, i64, u64), String> {
+    use ahash::AHashSet;
+    let need: AHashSet<(i64, i64, u64)> = top.iter().map(|(k, _)| *k).collect();
+    let mut out = AHashMap::with_capacity(need.len());
+    for i in 0..row_count {
+        if !mask.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let key = (users[i], minutes(i), hash_str(phrases.get(i)));
+        if need.contains(&key) && !out.contains_key(&key) {
+            out.insert(key, phrases.get(i).to_string());
+            if out.len() == need.len() {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn user_minute_phrase_topk_by_sort(
+    users: &[i64],
+    minutes: impl Fn(usize) -> i64 + Sync + Copy,
+    phrases: &Utf8Column,
+    mask: &[bool],
+    row_count: usize,
+    limit: usize,
+    offset: usize,
+) -> Vec<Vec<String>> {
+    let mut triples =
+        collect_user_minute_phrase_triples(users, minutes, phrases, mask, row_count);
+    let top = super::agg_sort::sorted_topk_user_minute_phrase(&mut triples, limit, offset);
+    let phrase_map =
+        resolve_phrases_for_user_minute_hash(&top, users, minutes, phrases, mask, row_count);
+    top.into_iter()
+        .map(|((user, minute, hash), c)| {
+            vec![
+                user.to_string(),
+                minute.to_string(),
+                phrase_map[&(user, minute, hash)].clone(),
+                c.to_string(),
+            ]
+        })
+        .collect()
+}
+
 fn utf8_distinct_i64_counts(
     keys: &Utf8Column,
     vals: &[i64],
@@ -265,35 +428,40 @@ fn utf8_distinct_i64_counts(
 ) -> Vec<(String, u64)> {
     use rayon::prelude::*;
 
-    let mut pairs: Vec<(u64, i64, String)> = (0..row_count)
-        .into_par_iter()
-        .filter(|&i| mask.get(i).copied().unwrap_or(false))
-        .map(|i| (hash_str(keys.get(i)), vals[i], keys.get(i).to_string()))
-        .collect();
+    let mut pairs: Vec<(u64, i64)> = if row_count >= FUSED_PARALLEL_THRESHOLD {
+        (0..row_count)
+            .into_par_iter()
+            .filter(|&i| mask.get(i).copied().unwrap_or(false))
+            .map(|i| (hash_str(keys.get(i)), vals[i]))
+            .collect()
+    } else {
+        let mut v = Vec::new();
+        for i in 0..row_count {
+            if mask.get(i).copied().unwrap_or(false) {
+                v.push((hash_str(keys.get(i)), vals[i]));
+            }
+        }
+        v
+    };
     if pairs.is_empty() {
         return Vec::new();
     }
-    pairs.par_sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-    let mut out: Vec<(String, u64)> = Vec::new();
-    let mut i = 0;
-    while i < pairs.len() {
-        let h = pairs[i].0;
-        let phrase = pairs[i].2.clone();
-        let mut distinct = 1u64;
-        let mut prev = pairs[i].1;
-        i += 1;
-        while i < pairs.len() && pairs[i].0 == h {
-            if pairs[i].1 != prev {
-                distinct += 1;
-                prev = pairs[i].1;
-            }
-            i += 1;
+    let counts = super::agg_sort::distinct_count_per_hash_sorted(&mut pairs);
+    let mut phrase_by_hash: AHashMap<u64, String> = AHashMap::with_capacity(counts.len());
+    for i in 0..row_count {
+        if !mask.get(i).copied().unwrap_or(false) {
+            continue;
         }
-        let _ = h;
-        out.push((phrase, distinct));
+        let h = hash_str(keys.get(i));
+        phrase_by_hash.entry(h).or_insert_with(|| keys.get(i).to_string());
+        if phrase_by_hash.len() == counts.len() {
+            break;
+        }
     }
-    out
+    counts
+        .into_iter()
+        .map(|(h, distinct)| (phrase_by_hash[&h].clone(), distinct))
+        .collect()
 }
 
 fn merge_count_shards(
@@ -890,21 +1058,7 @@ fn try_fused_int_utf8_count(
     let user_at = |i: usize| i64_at(ic, i).unwrap_or(0);
 
     if limit < usize::MAX && orders_by_count_desc(parsed) {
-        let groups = parallel_user_utf8_agg(user_at, udata, &mask, row_count);
-        let rows: Vec<Vec<String>> = super::agg_heap::top_counts(
-            groups.into_iter().map(|((user, _), agg)| {
-                (
-                    agg.count,
-                    vec![
-                        user.to_string(),
-                        agg.phrase,
-                        agg.count.to_string(),
-                    ],
-                )
-            }),
-            limit,
-            offset,
-        );
+        let rows = user_phrase_topk_by_sort(user_at, udata, &mask, row_count, limit, offset);
         return Ok(Some(QueryResult { columns, rows }));
     }
 
@@ -1107,25 +1261,12 @@ fn try_fused_q19(
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
 
     if limit < usize::MAX && orders_by_count_desc(parsed) {
-        let groups = parallel_user_minute_utf8_agg(
+        let rows = user_minute_phrase_topk_by_sort(
             users,
             |i| event_time_minute_of_hour(times[i]),
             phrases,
             &mask,
             row_count,
-        );
-        let rows: Vec<Vec<String>> = super::agg_heap::top_counts(
-            groups.into_iter().map(|((user, minute, _), agg)| {
-                (
-                    agg.count,
-                    vec![
-                        user.to_string(),
-                        minute.to_string(),
-                        agg.phrase,
-                        agg.count.to_string(),
-                    ],
-                )
-            }),
             limit,
             offset,
         );

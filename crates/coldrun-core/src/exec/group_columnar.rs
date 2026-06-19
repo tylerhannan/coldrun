@@ -155,89 +155,13 @@ fn topk_from_shards(shards: ShardMaps, limit: usize, offset: usize) -> Vec<(u128
     merge_global_topk(candidates.into_iter(), limit, offset)
 }
 
-/// Q36: count by ClientIP (u32), 256-way sharded exact agg.
+/// Q36: sort ClientIP + run-length counts — no multi-million-entry hash map.
 pub fn clientip_quad_topk(ips: &[i32], limit: usize, offset: usize) -> Vec<(u128, u64)> {
-    let entries = if ips.len() >= Q36_PARALLEL_THRESHOLD {
-        clientip_topk_parallel(ips, limit, offset)
-    } else {
-        clientip_topk_serial(ips, limit, offset)
-    };
-    entries
+    use super::agg_sort::sorted_topk_i32;
+    sorted_topk_i32(ips, limit, offset)
         .into_iter()
         .map(|(ip, c)| (pack_clientip_quad(ip as i32), c))
         .collect()
-}
-
-fn clientip_topk_serial(ips: &[i32], limit: usize, offset: usize) -> Vec<(u32, u64)> {
-    let mut shards = empty_u32_shards(ips.len());
-    clientip_scan_chunk(&mut shards, ips);
-    topk_from_u32_shards(shards, limit, offset)
-}
-
-#[inline]
-fn clientip_scan_chunk(shards: &mut U32ShardMaps, chunk: &[i32]) {
-    let mut i = 0;
-    let len = chunk.len();
-    while i + 32 <= len {
-        u32_shard_add(shards, chunk[i]);
-        u32_shard_add(shards, chunk[i + 1]);
-        u32_shard_add(shards, chunk[i + 2]);
-        u32_shard_add(shards, chunk[i + 3]);
-        u32_shard_add(shards, chunk[i + 4]);
-        u32_shard_add(shards, chunk[i + 5]);
-        u32_shard_add(shards, chunk[i + 6]);
-        u32_shard_add(shards, chunk[i + 7]);
-        u32_shard_add(shards, chunk[i + 8]);
-        u32_shard_add(shards, chunk[i + 9]);
-        u32_shard_add(shards, chunk[i + 10]);
-        u32_shard_add(shards, chunk[i + 11]);
-        u32_shard_add(shards, chunk[i + 12]);
-        u32_shard_add(shards, chunk[i + 13]);
-        u32_shard_add(shards, chunk[i + 14]);
-        u32_shard_add(shards, chunk[i + 15]);
-        u32_shard_add(shards, chunk[i + 16]);
-        u32_shard_add(shards, chunk[i + 17]);
-        u32_shard_add(shards, chunk[i + 18]);
-        u32_shard_add(shards, chunk[i + 19]);
-        u32_shard_add(shards, chunk[i + 20]);
-        u32_shard_add(shards, chunk[i + 21]);
-        u32_shard_add(shards, chunk[i + 22]);
-        u32_shard_add(shards, chunk[i + 23]);
-        u32_shard_add(shards, chunk[i + 24]);
-        u32_shard_add(shards, chunk[i + 25]);
-        u32_shard_add(shards, chunk[i + 26]);
-        u32_shard_add(shards, chunk[i + 27]);
-        u32_shard_add(shards, chunk[i + 28]);
-        u32_shard_add(shards, chunk[i + 29]);
-        u32_shard_add(shards, chunk[i + 30]);
-        u32_shard_add(shards, chunk[i + 31]);
-        i += 32;
-    }
-    while i < len {
-        u32_shard_add(shards, chunk[i]);
-        i += 1;
-    }
-}
-
-fn clientip_topk_parallel(ips: &[i32], limit: usize, offset: usize) -> Vec<(u32, u64)> {
-    use rayon::prelude::*;
-
-    let cap = (ips.len() / (COUNT_SHARDS * 4)).max(8);
-    let shards = ips
-        .par_chunks(CHUNK)
-        .fold(
-            || empty_u32_shards(ips.len()),
-            |mut shards, chunk| {
-                clientip_scan_chunk(&mut shards, chunk);
-                shards
-            },
-        )
-        .reduce(
-            || std::array::from_fn(|_| AHashMap::with_capacity(cap)),
-            merge_u32_shard_maps,
-        );
-
-    topk_from_u32_shards(shards, limit, offset)
 }
 
 #[inline(always)]
@@ -312,6 +236,19 @@ fn zone_range_rows(zone_ranges: &[(usize, usize)]) -> usize {
     zone_ranges.iter().map(|&(s, e)| e.saturating_sub(s)).sum()
 }
 
+fn zone_subranges(zone_ranges: &[(usize, usize)], chunk: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for &(start, end) in zone_ranges {
+        let mut s = start;
+        while s < end {
+            let e = (s + chunk).min(end);
+            out.push((s, e));
+            s = e;
+        }
+    }
+    out
+}
+
 fn dashboard_q41_topk_serial(
     zone_ranges: &[(usize, usize)],
     referer_hash: i64,
@@ -329,41 +266,22 @@ fn dashboard_q41_topk_serial(
     limit: usize,
     offset: usize,
 ) -> Vec<(u128, u64)> {
-    let scan_rows = zone_range_rows(zone_ranges);
-    let mut shards = empty_shards(scan_rows);
-    for &(start, end) in zone_ranges {
-        scan_q41_zone_sharded(
-            &mut shards,
-            start,
-            end,
-            referer_hash,
-            counter,
-            min_date,
-            max_date,
-            is_refresh,
-            referer,
-            counters,
-            dates,
-            refresh,
-            traffic,
-            url_hashes,
-            url_high,
-        );
-    }
-    topk_from_shards(shards, limit, offset)
-}
-
-fn zone_subranges(zone_ranges: &[(usize, usize)], chunk: usize) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    for &(start, end) in zone_ranges {
-        let mut s = start;
-        while s < end {
-            let e = (s + chunk).min(end);
-            out.push((s, e));
-            s = e;
-        }
-    }
-    out
+    let keys = collect_q41_keys(
+        zone_ranges,
+        referer_hash,
+        counter,
+        min_date,
+        max_date,
+        is_refresh,
+        referer,
+        counters,
+        dates,
+        refresh,
+        traffic,
+        url_hashes,
+        url_high,
+    );
+    super::agg_sort::sorted_topk_u128(&keys, limit, offset)
 }
 
 fn dashboard_q41_topk_parallel(
@@ -383,49 +301,26 @@ fn dashboard_q41_topk_parallel(
     limit: usize,
     offset: usize,
 ) -> Vec<(u128, u64)> {
-    use rayon::prelude::*;
-
-    let subranges = zone_subranges(zone_ranges, CHUNK);
-    let scan_rows = zone_range_rows(zone_ranges);
-    let cap = (scan_rows / (COUNT_SHARDS * 2)).max(4);
-    let shards = subranges
-        .par_iter()
-        .fold(
-            || empty_shards(scan_rows),
-            |mut shards, &(start, end)| {
-                scan_q41_zone_sharded(
-                    &mut shards,
-                    start,
-                    end,
-                    referer_hash,
-                    counter,
-                    min_date,
-                    max_date,
-                    is_refresh,
-                    referer,
-                    counters,
-                    dates,
-                    refresh,
-                    traffic,
-                    url_hashes,
-                    url_high,
-                );
-                shards
-            },
-        )
-        .reduce(
-            || std::array::from_fn(|_| AHashMap::with_capacity(cap)),
-            merge_shard_maps,
-        );
-
-    topk_from_shards(shards, limit, offset)
+    let keys = collect_q41_keys(
+        zone_ranges,
+        referer_hash,
+        counter,
+        min_date,
+        max_date,
+        is_refresh,
+        referer,
+        counters,
+        dates,
+        refresh,
+        traffic,
+        url_hashes,
+        url_high,
+    );
+    super::agg_sort::sorted_topk_u128(&keys, limit, offset)
 }
 
-#[inline]
-fn scan_q41_zone_sharded(
-    shards: &mut ShardMaps,
-    start: usize,
-    end: usize,
+fn collect_q41_keys(
+    zone_ranges: &[(usize, usize)],
     referer_hash: i64,
     counter: i32,
     min_date: i32,
@@ -438,27 +333,34 @@ fn scan_q41_zone_sharded(
     traffic: &[i16],
     url_hashes: &[i64],
     url_high: bool,
-) {
-    for_each_q41_zone_match(
-        start,
-        end,
-        referer_hash,
-        counter,
-        min_date,
-        max_date,
-        is_refresh,
-        referer,
-        counters,
-        dates,
-        refresh,
-        traffic,
-        |i| {
-            shard_add(
-                shards,
-                pack_q41_pair(url_hashes[i], dates[i], url_high),
+) -> Vec<u128> {
+    use rayon::prelude::*;
+    let subranges = zone_subranges(zone_ranges, CHUNK);
+    subranges
+        .par_iter()
+        .map(|&(start, end)| {
+            let mut keys = Vec::new();
+            for_each_q41_zone_match(
+                start,
+                end,
+                referer_hash,
+                counter,
+                min_date,
+                max_date,
+                is_refresh,
+                referer,
+                counters,
+                dates,
+                refresh,
+                traffic,
+                |i| keys.push(pack_q41_pair(url_hashes[i], dates[i], url_high)),
             );
-        },
-    );
+            keys
+        })
+        .reduce(Vec::new, |mut a, mut b| {
+            a.append(&mut b);
+            a
+        })
 }
 
 /// Q41 fallback when zone index is unavailable.

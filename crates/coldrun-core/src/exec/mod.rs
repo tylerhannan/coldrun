@@ -1,5 +1,6 @@
 mod aggregate;
 mod agg_heap;
+mod agg_sort;
 mod agg_topk;
 mod column_slice;
 mod fast_agg;
