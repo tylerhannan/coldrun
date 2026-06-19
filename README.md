@@ -105,13 +105,12 @@ docs/benchmarks/       # committed timing + validation snapshots
 
 ## Next (planned)
 
-**Correctness:** demo @ 100k and 1M Parquet both **43/43** (ClickHouse reference).
+**Done on laptop:** demo + 1M Parquet **43/43** vs ClickHouse; warm-serve hot sum **0.84s** vs CH **1.34s** (**0.62×**) — [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md).
 
-**Perf (1M Parquet, warm serve):** hot sum **0.84s** vs ClickHouse **1.34s** (**0.62×**). See [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md).
-
-1. **Q36 / Q41** — remaining gap vs CH on heavy int GROUP BY (~0.13s each; CH ~0.007–0.018s)
-2. **Scale** — 10M+ slice validation; full 100M only for ClickBench cloud run
-3. **ClickBench PR** — `clickbench/coldrun/benchmark.sh` on `c6a.4xlarge` (warm CH server there) — see [`docs/CLOUD-RUN.md`](docs/CLOUD-RUN.md)
+1. **100M cloud load** — finish load + smoke (Q1/Q36/Q41) on AWS; streaming loader + u64 UTF8 offsets (`4365385`…`e134699`). Target **`c6a.4xlarge`** — see [`docs/CLOUD-RUN.md`](docs/CLOUD-RUN.md).
+2. **Warm bench vs ClickHouse** on 100M Parquet (`bench-serve.sh` / `bench-clickhouse-parquet.sh`) before committing Combined numbers.
+3. **Q36 / Q41** — largest 1M hot gaps (**0.13s** vs CH **0.007–0.018s**); tune further once 100M data is loaded.
+4. **ClickBench PR** — official `clickbench/coldrun/benchmark.sh` (cold + hot, load + disk size) after cloud smoke passes.
 
 Snapshots: [`serve-hot.md`](docs/benchmarks/demo-100k/serve-hot.md) (demo) · [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md) (1M Parquet) · per-query notes [`docs/perf/`](docs/perf/)
 
