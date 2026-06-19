@@ -217,6 +217,62 @@ pub fn distinct_count_per_hash_sorted(
     out
 }
 
+/// Top SearchPhrase groups by row count + distinct users from sorted `(phrase_hash, user)` pairs.
+pub fn sorted_topk_phrase_user_counts(
+    pairs: &mut [(u64, i64)],
+    limit: usize,
+    offset: usize,
+) -> Vec<(u64, u64, u64)> {
+    use rayon::prelude::*;
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+    if pairs.len() >= SORT_PARALLEL_THRESHOLD {
+        pairs.par_sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    } else {
+        pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    }
+    let need = limit.saturating_add(offset);
+    if need == 0 {
+        return Vec::new();
+    }
+    let mut heap: BinaryHeap<Reverse<(u64, u64, u64)>> = BinaryHeap::new();
+    let mut i = 0;
+    while i < pairs.len() {
+        let h = pairs[i].0;
+        let mut count = 1u64;
+        let mut distinct = 1u64;
+        let mut prev_user = pairs[i].1;
+        i += 1;
+        while i < pairs.len() && pairs[i].0 == h {
+            count += 1;
+            if pairs[i].1 != prev_user {
+                distinct += 1;
+                prev_user = pairs[i].1;
+            }
+            i += 1;
+        }
+        let entry = (count, h, distinct);
+        if heap.len() < need {
+            heap.push(Reverse(entry));
+        } else if let Some(&Reverse((min_c, _, _))) = heap.peek() {
+            if count > min_c {
+                heap.push(Reverse(entry));
+                if heap.len() > need {
+                    heap.pop();
+                }
+            }
+        }
+    }
+    let mut out: Vec<(u64, u64, u64)> = heap.into_iter().map(|Reverse(t)| t).collect();
+    out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    out.into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(count, h, distinct)| (h, count, distinct))
+        .collect()
+}
+
 #[allow(dead_code)]
 pub fn cmp_u128(a: u128, b: u128) -> Ordering {
     a.cmp(&b)
