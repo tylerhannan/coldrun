@@ -16,7 +16,7 @@ pub struct StreamingColumnWriter {
     row_count: u64,
     pod_path: Option<PathBuf>,
     utf8_body_path: Option<PathBuf>,
-    utf8_offsets: Vec<u32>,
+    utf8_offsets: Vec<u64>,
 }
 
 impl StreamingColumnWriter {
@@ -64,11 +64,7 @@ impl StreamingColumnWriter {
                     .as_ref()
                     .ok_or_else(|| crate::Error::msg("utf8 staging path missing"))?;
                 let mut body = std::fs::OpenOptions::new().append(true).open(body_path)?;
-                let base = body.metadata()?.len();
-                if base > u32::MAX as u64 {
-                    return Err(crate::Error::msg("utf8 staging body too large"));
-                }
-                let mut body_len = base as u32;
+                let mut body_len = body.metadata()?.len();
                 self.utf8_offsets.reserve(chunk.len());
                 for s in chunk.iter() {
                     self.utf8_offsets.push(body_len);
@@ -76,7 +72,7 @@ impl StreamingColumnWriter {
                     body.write_all(&(bytes.len() as u32).to_le_bytes())?;
                     body.write_all(bytes)?;
                     body_len = body_len
-                        .checked_add(4 + bytes.len() as u32)
+                        .checked_add(4 + bytes.len() as u64)
                         .ok_or_else(|| crate::Error::msg("utf8 staging body overflow"))?;
                 }
             }
@@ -150,7 +146,7 @@ fn finalize_utf8(
     col_path: &Path,
     count: u64,
     body_path: &Path,
-    offsets: &[u32],
+    offsets: &[u64],
 ) -> Result<()> {
     let body_len = fs::metadata(body_path)?.len();
     let raw_len = 8 + body_len;

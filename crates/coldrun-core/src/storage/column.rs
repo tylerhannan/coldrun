@@ -123,7 +123,7 @@ impl ColumnData {
         write_col_payload(path, self.column_type(), &raw, utf8_offsets.as_deref())
     }
 
-    fn encode_payload(&self) -> Result<(Vec<u8>, Option<Vec<u32>>)> {
+    fn encode_payload(&self) -> Result<(Vec<u8>, Option<Vec<u64>>)> {
         let mut raw = Vec::new();
         let count = self.len() as u64;
         raw.extend_from_slice(&count.to_le_bytes());
@@ -150,14 +150,14 @@ impl ColumnData {
             }
             ColumnData::Utf8(v) => {
                 let mut offsets = Vec::with_capacity(v.len());
-                let mut pos = 0usize;
+                let mut pos = 0u64;
                 for s in v.iter() {
-                    offsets.push(pos as u32);
+                    offsets.push(pos);
                     let bytes = s.as_bytes();
                     let len = bytes.len() as u32;
                     raw.extend_from_slice(&len.to_le_bytes());
                     raw.extend_from_slice(bytes);
-                    pos += 4 + bytes.len();
+                    pos += 4 + bytes.len() as u64;
                 }
                 Some(offsets)
             }
@@ -275,7 +275,7 @@ fn decode_cells_at(
     payload: &[u8],
     col_type: ColumnType,
     rows: &[usize],
-    utf8_offsets: Option<&[u32]>,
+    utf8_offsets: Option<&[u64]>,
 ) -> Result<Vec<String>> {
     if payload.len() < 8 {
         return Err(crate::Error::msg("column payload truncated"));
@@ -297,7 +297,7 @@ fn format_cell_at(
     col_type: ColumnType,
     row: usize,
     count: usize,
-    utf8_offsets: Option<&[u32]>,
+    utf8_offsets: Option<&[u64]>,
 ) -> Result<String> {
     Ok(match col_type {
         ColumnType::Int64 => read_pod_at::<i64>(body, row)?.to_string(),
@@ -351,7 +351,7 @@ pub(crate) fn write_col_payload(
     path: &Path,
     col_type: ColumnType,
     raw: &[u8],
-    utf8_offsets: Option<&[u32]>,
+    utf8_offsets: Option<&[u64]>,
 ) -> Result<()> {
     if let Some(offsets) = utf8_offsets {
         write_utf8_idx_sidecar(path, offsets)?;

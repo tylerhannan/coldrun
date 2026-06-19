@@ -9,15 +9,18 @@ use arrow::array::{Array, LargeStringArray, StringArray};
 
 use crate::Result;
 
+const IDX_VERSION_U32: u8 = 1;
+const IDX_VERSION_U64: u8 = 2;
+
 #[derive(Debug, Clone)]
 enum Utf8Storage {
     Building {
         body: Vec<u8>,
-        offsets: Vec<u32>,
+        offsets: Vec<u64>,
     },
     Frozen {
         body: Arc<[u8]>,
-        offsets: Arc<[u32]>,
+        offsets: Arc<[u64]>,
     },
 }
 
@@ -47,7 +50,7 @@ impl Utf8Column {
         self.len() == 0
     }
 
-    fn body_offsets(&self) -> (&[u8], &[u32]) {
+    fn body_offsets(&self) -> (&[u8], &[u64]) {
         match &self.storage {
             Utf8Storage::Building { body, offsets } => (body, offsets),
             Utf8Storage::Frozen { body, offsets } => (body, offsets),
@@ -83,7 +86,7 @@ impl Utf8Column {
             self.ensure_building();
             return self.push_str(s);
         };
-        offsets.push(body.len() as u32);
+        offsets.push(body.len() as u64);
         let bytes = s.as_bytes();
         body.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         body.extend_from_slice(bytes);
@@ -96,7 +99,7 @@ impl Utf8Column {
         };
         offsets.reserve(array.len());
         for i in 0..array.len() {
-            offsets.push(body.len() as u32);
+            offsets.push(body.len() as u64);
             let bytes = if array.is_null(i) {
                 &[][..]
             } else {
@@ -114,7 +117,7 @@ impl Utf8Column {
         };
         offsets.reserve(array.len());
         for i in 0..array.len() {
-            offsets.push(body.len() as u32);
+            offsets.push(body.len() as u64);
             let bytes = if array.is_null(i) {
                 &[][..]
             } else {
@@ -138,11 +141,11 @@ impl Utf8Column {
             unreachable!();
         };
         let (other_body, other_offsets) = other.body_offsets();
-        let base = body.len();
+        let base = body.len() as u64;
         body.extend_from_slice(other_body);
         offsets.reserve(other_offsets.len());
         for &off in other_offsets {
-            offsets.push(base as u32 + off);
+            offsets.push(base + off);
         }
     }
 
@@ -166,7 +169,7 @@ impl Utf8Column {
         let mut offsets = Vec::new();
         let mut pos = 0usize;
         while pos + 4 <= body.len() {
-            offsets.push(pos as u32);
+            offsets.push(pos as u64);
             let len = u32::from_le_bytes(body[pos..pos + 4].try_into().unwrap()) as usize;
             pos += 4 + len;
             if pos > body.len() {
@@ -212,30 +215,45 @@ fn utf8_idx_path(col_path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(p)
 }
 
-pub(crate) fn read_utf8_offsets(col_path: &Path) -> Option<Vec<u32>> {
+pub(crate) fn read_utf8_offsets(col_path: &Path) -> Option<Vec<u64>> {
     let path = utf8_idx_path(col_path);
     let mut f = std::fs::File::open(path).ok()?;
     let mut header = [0u8; 13];
     f.read_exact(&mut header).ok()?;
-    if &header[..4] != b"CRUI" || header[4] != 1 {
+    if &header[..4] != b"CRUI" {
         return None;
     }
     let count = u64::from_le_bytes(header[5..13].try_into().ok()?) as usize;
-    let mut bytes = vec![0u8; count * 4];
-    f.read_exact(&mut bytes).ok()?;
-    Some(
-        bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-            .collect(),
-    )
+    match header[4] {
+        IDX_VERSION_U32 => {
+            let mut bytes = vec![0u8; count * 4];
+            f.read_exact(&mut bytes).ok()?;
+            Some(
+                bytes
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as u64)
+                    .collect(),
+            )
+        }
+        IDX_VERSION_U64 => {
+            let mut bytes = vec![0u8; count * 8];
+            f.read_exact(&mut bytes).ok()?;
+            Some(
+                bytes
+                    .chunks_exact(8)
+                    .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
 }
 
-pub(crate) fn write_utf8_idx_sidecar(col_path: &Path, offsets: &[u32]) -> Result<()> {
+pub(crate) fn write_utf8_idx_sidecar(col_path: &Path, offsets: &[u64]) -> Result<()> {
     let path = utf8_idx_path(col_path);
-    let mut out = Vec::with_capacity(4 + 1 + 8 + offsets.len() * 4);
+    let mut out = Vec::with_capacity(4 + 1 + 8 + offsets.len() * 8);
     out.extend_from_slice(b"CRUI");
-    out.push(1);
+    out.push(IDX_VERSION_U64);
     out.extend_from_slice(&(offsets.len() as u64).to_le_bytes());
     for &off in offsets {
         out.extend_from_slice(&off.to_le_bytes());
@@ -244,7 +262,12 @@ pub(crate) fn write_utf8_idx_sidecar(col_path: &Path, offsets: &[u32]) -> Result
     Ok(())
 }
 
-pub(crate) fn utf8_str_at(body: &[u8], offsets: Option<&[u32]>, row: usize, count: usize) -> Result<String> {
+pub(crate) fn utf8_str_at(
+    body: &[u8],
+    offsets: Option<&[u64]>,
+    row: usize,
+    count: usize,
+) -> Result<String> {
     if let Some(offsets) = offsets {
         let mut pos = *offsets
             .get(row)
