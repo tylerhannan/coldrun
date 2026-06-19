@@ -8,6 +8,17 @@ COLDRUN="${COLDRUN_BIN:-$ROOT/target/release/coldrun}"
 DATA_DIR="${COLDRUN_DATA:-$DIR/.clickbench}"
 PARQUET="${HITS_PARQUET:-hits.parquet}"
 
+if [[ ! -f "$PARQUET" ]]; then
+  echo "error: parquet not found: $PARQUET" >&2
+  exit 1
+fi
+if [[ ! -x "$COLDRUN" ]]; then
+  echo "error: coldrun binary missing; run ./clickbench/coldrun/install" >&2
+  exit 1
+fi
+
+echo "load: coldrun=$("$COLDRUN" --version 2>/dev/null || echo unknown) parquet=$PARQUET data=$DATA_DIR" >&2
+
 rm -rf "$DATA_DIR"
 mkdir -p "$DATA_DIR"
 

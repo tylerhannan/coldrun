@@ -164,6 +164,8 @@ pub fn load_parquet_columns(
     let reader = builder.build().map_err(|e| crate::Error::msg(e.to_string()))?;
 
     let mut total_rows = 0u64;
+    let mut last_progress = 0u64;
+    eprintln!("load: ingest start ({})", parquet_path.display());
     for batch in reader {
         let batch = batch.map_err(|e| crate::Error::msg(e.to_string()))?;
         let n = batch.num_rows();
@@ -187,9 +189,16 @@ pub fn load_parquet_columns(
                 .ok_or_else(|| crate::Error::msg(format!("missing staging writer for {col_name}")))?
                 .append(&chunk)?;
         }
+
+        if total_rows / 10_000_000 > last_progress / 10_000_000 {
+            last_progress = total_rows;
+            eprintln!("load: ingest {total_rows} rows");
+        }
     }
 
-    for (name, _ty) in col_schema {
+    eprintln!("load: finalize {total_rows} rows, {} columns", col_schema.len());
+    for (i, (name, _ty)) in col_schema.iter().enumerate() {
+        eprintln!("load: finalize column {}/{} ({name})", i + 1, col_schema.len());
         let col_path = col_dir.join(format!("{name}.col"));
         writers
             .remove(name)
@@ -197,6 +206,7 @@ pub fn load_parquet_columns(
             .finalize(&col_path)?;
     }
 
+    eprintln!("load: build zones");
     table.set_row_count(total_rows);
     table.build_zones_from_disk()?;
     table.save_meta()?;
