@@ -258,7 +258,7 @@ impl Table {
         Ok(())
     }
 
-    fn save_meta(&self) -> Result<()> {
+    pub(crate) fn save_meta(&self) -> Result<()> {
         let data = serde_json::to_string_pretty(&self.meta)?;
         std::fs::write(self.path.join(META), data)?;
         Ok(())
@@ -266,5 +266,27 @@ impl Table {
 
     pub fn set_row_count(&mut self, count: u64) {
         self.meta.row_count = count;
+    }
+
+    /// Build zone index from on-disk columns after a streaming load.
+    pub fn build_zones_from_disk(&mut self) -> Result<()> {
+        const ZONE_COLS: &[&str] = &["CounterID", "EventDate", "AdvEngineID", "EventTime"];
+        let names: Vec<&str> = ZONE_COLS
+            .iter()
+            .copied()
+            .filter(|name| self.column_type(name).is_some())
+            .collect();
+        if names.is_empty() {
+            return Ok(());
+        }
+        self.load_columns(&names)?;
+        if let Some(index) = ZoneIndex::build(self) {
+            index.write(&self.path)?;
+            self.zones = Some(index);
+        }
+        for name in names {
+            self.columns.remove(name);
+        }
+        Ok(())
     }
 }

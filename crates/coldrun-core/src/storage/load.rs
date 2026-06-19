@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use rayon::prelude::*;
@@ -8,6 +9,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, TimeUnit};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use super::column::{ColumnData, ColumnType};
+use super::column_staging::StreamingColumnWriter;
 use super::pod::PodStorage;
 use super::table::{ColumnMeta, Table};
 use super::Database;
@@ -147,9 +149,14 @@ pub fn load_parquet_columns(
         .collect();
 
     let mut table = Table::create(&table_dir, table_name, meta_cols)?;
-    for (name, ty) in col_schema {
-        table.ensure_column(name, *ty)?;
-    }
+
+    let col_dir = table_dir.join("columns");
+    let mut writers: HashMap<String, StreamingColumnWriter> = col_schema
+        .iter()
+        .map(|(name, ty)| {
+            StreamingColumnWriter::new(&col_dir, name, *ty).map(|writer| (name.clone(), writer))
+        })
+        .collect::<Result<_>>()?;
 
     let file = std::fs::File::open(parquet_path)?;
     let builder =
@@ -175,12 +182,24 @@ pub fn load_parquet_columns(
             .collect::<Result<Vec<_>>>()?;
 
         for (col_name, chunk) in chunks {
-            table.column_mut(&col_name)?.extend_from(&chunk)?;
+            writers
+                .get_mut(&col_name)
+                .ok_or_else(|| crate::Error::msg(format!("missing staging writer for {col_name}")))?
+                .append(&chunk)?;
         }
     }
 
+    for (name, _ty) in col_schema {
+        let col_path = col_dir.join(format!("{name}.col"));
+        writers
+            .remove(name)
+            .ok_or_else(|| crate::Error::msg(format!("missing staging writer for {name}")))?
+            .finalize(&col_path)?;
+    }
+
     table.set_row_count(total_rows);
-    table.flush()?;
+    table.build_zones_from_disk()?;
+    table.save_meta()?;
     db.register_table(table_name)?;
     Ok(total_rows)
 }

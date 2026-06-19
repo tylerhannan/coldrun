@@ -1,4 +1,5 @@
 mod column;
+mod column_staging;
 mod demo;
 mod load;
 mod pod;

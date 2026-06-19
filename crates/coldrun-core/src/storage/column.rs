@@ -9,11 +9,11 @@ use super::pod::PodStorage;
 use super::utf8_col::{read_utf8_offsets, utf8_str_at, write_utf8_idx_sidecar, Utf8Column};
 use crate::Result;
 
-const MAGIC: &[u8; 4] = b"CRUN";
+pub(crate) const MAGIC: &[u8; 4] = b"CRUN";
 const IDX_MAGIC: &[u8; 4] = b"CRUI";
-const FORMAT_V1: u8 = 1;
-const ENC_RAW: u8 = 0;
-const ENC_LZ4: u8 = 1;
+pub(crate) const FORMAT_V1: u8 = 1;
+pub(crate) const ENC_RAW: u8 = 0;
+pub(crate) const ENC_LZ4: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColumnType {
@@ -119,15 +119,35 @@ impl ColumnData {
     }
 
     pub fn write_file(&self, path: &Path) -> Result<()> {
+        let (raw, utf8_offsets) = self.encode_payload()?;
+        write_col_payload(path, self.column_type(), &raw, utf8_offsets.as_deref())
+    }
+
+    fn encode_payload(&self) -> Result<(Vec<u8>, Option<Vec<u32>>)> {
         let mut raw = Vec::new();
         let count = self.len() as u64;
         raw.extend_from_slice(&count.to_le_bytes());
-        match self {
-            ColumnData::Int64(v) => write_pod_vec(&mut raw, v),
-            ColumnData::Int32(v) => write_pod_vec(&mut raw, v),
-            ColumnData::Int16(v) => write_pod_vec(&mut raw, v),
-            ColumnData::Date(v) => write_pod_vec(&mut raw, v),
-            ColumnData::Timestamp(v) => write_pod_vec(&mut raw, v),
+        let utf8_offsets = match self {
+            ColumnData::Int64(v) => {
+                write_pod_vec(&mut raw, v);
+                None
+            }
+            ColumnData::Int32(v) => {
+                write_pod_vec(&mut raw, v);
+                None
+            }
+            ColumnData::Int16(v) => {
+                write_pod_vec(&mut raw, v);
+                None
+            }
+            ColumnData::Date(v) => {
+                write_pod_vec(&mut raw, v);
+                None
+            }
+            ColumnData::Timestamp(v) => {
+                write_pod_vec(&mut raw, v);
+                None
+            }
             ColumnData::Utf8(v) => {
                 let mut offsets = Vec::with_capacity(v.len());
                 let mut pos = 0usize;
@@ -139,32 +159,10 @@ impl ColumnData {
                     raw.extend_from_slice(bytes);
                     pos += 4 + bytes.len();
                 }
-                write_utf8_idx_sidecar(path, &offsets)?;
+                Some(offsets)
             }
-        }
-        let payload = if raw.len() > 4096 {
-            lz4_flex::compress_prepend_size(&raw)
-        } else {
-            raw.clone()
         };
-        let encoding = if payload.len() < raw.len() {
-            ENC_LZ4
-        } else {
-            ENC_RAW
-        };
-        let body = if encoding == ENC_LZ4 {
-            &payload
-        } else {
-            &raw
-        };
-
-        let mut f = File::create(path)?;
-        f.write_all(MAGIC)?;
-        f.write_all(&[FORMAT_V1])?;
-        f.write_all(&[self.column_type() as u8])?;
-        f.write_all(&[encoding])?;
-        f.write_all(body)?;
-        Ok(())
+        Ok((raw, utf8_offsets))
     }
 
     pub fn read_file(path: &Path) -> Result<Self> {
@@ -347,6 +345,40 @@ fn parse_col_type(tag: u8) -> Result<ColumnType> {
         5 => ColumnType::Timestamp,
         n => return Err(crate::Error::msg(format!("unknown column type tag {n}"))),
     })
+}
+
+pub(crate) fn write_col_payload(
+    path: &Path,
+    col_type: ColumnType,
+    raw: &[u8],
+    utf8_offsets: Option<&[u32]>,
+) -> Result<()> {
+    if let Some(offsets) = utf8_offsets {
+        write_utf8_idx_sidecar(path, offsets)?;
+    }
+    let payload = if raw.len() > 4096 {
+        lz4_flex::compress_prepend_size(raw)
+    } else {
+        raw.to_vec()
+    };
+    let encoding = if payload.len() < raw.len() {
+        ENC_LZ4
+    } else {
+        ENC_RAW
+    };
+    let body = if encoding == ENC_LZ4 {
+        &payload
+    } else {
+        raw
+    };
+
+    let mut f = File::create(path)?;
+    f.write_all(MAGIC)?;
+    f.write_all(&[FORMAT_V1])?;
+    f.write_all(&[col_type as u8])?;
+    f.write_all(&[encoding])?;
+    f.write_all(body)?;
+    Ok(())
 }
 
 fn write_pod_vec<T: Copy>(out: &mut Vec<u8>, data: &[T]) {
