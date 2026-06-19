@@ -1,4 +1,5 @@
 mod column;
+pub(crate) mod column_stream;
 mod column_staging;
 mod demo;
 mod load;
@@ -76,6 +77,20 @@ impl Database {
             return Err(Error::msg(format!("table '{name}' does not exist")));
         }
         Table::open(self.table_path(name))
+    }
+
+    /// Open `hits` metadata only (no column decode). Used by streaming kernels.
+    pub fn ensure_hits_meta(&mut self) -> Result<&mut Table> {
+        if !self.has_table("hits") {
+            return Err(Error::msg("table 'hits' does not exist"));
+        }
+        if self.cached_hits.is_none() {
+            self.cached_hits = Some(Table::open_columns(
+                self.table_path("hits"),
+                Some(&std::collections::HashSet::new()),
+            )?);
+        }
+        Ok(self.cached_hits.as_mut().unwrap())
     }
 
     /// Open a table loading only columns referenced by the parsed query.

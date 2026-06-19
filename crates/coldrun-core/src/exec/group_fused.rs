@@ -39,9 +39,6 @@ pub fn try_execute_group_fused(
     if let Some(r) = super::group_fused_q22::try_fused_q22(table, parsed, row_count)? {
         return Ok(Some(r));
     }
-    if let Some(r) = super::group_fused_q23::try_fused_q23(table, parsed, row_count)? {
-        return Ok(Some(r));
-    }
     if let Some(r) = super::group_fused_q11::try_fused_utf8_one_distinct(table, parsed, row_count)? {
         return Ok(Some(r));
     }

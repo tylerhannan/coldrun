@@ -191,6 +191,13 @@ impl Table {
             .retain(|name, _| keep.contains(name));
     }
 
+    /// Drop decoded columns by name (streaming kernels release memory before next scan).
+    pub fn drop_columns(&mut self, names: &[&str]) {
+        for name in names {
+            self.columns.remove(*name);
+        }
+    }
+
     /// Project row values at `row_indices` without loading full columns into memory.
     pub fn project_rows(&self, row_indices: &[usize]) -> Result<(Vec<String>, Vec<Vec<String>>)> {
         let names: Vec<String> = self.meta.columns.iter().map(|c| c.name.clone()).collect();

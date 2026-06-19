@@ -20,6 +20,10 @@ struct GroupBucket {
 }
 
 pub fn execute_grouped(db: &mut Database, parsed: &ParsedQuery) -> Result<QueryResult> {
+    if let Some(result) = super::group_fused_q23::try_fused_q23_streaming(db, parsed)? {
+        return Ok(result);
+    }
+
     let table = db.open_table_for_query("hits", parsed)?;
     let row_count = table.row_count() as usize;
 

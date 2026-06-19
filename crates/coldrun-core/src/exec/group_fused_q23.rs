@@ -1,15 +1,16 @@
 //! Q23: SearchPhrase + MIN(URL) + MIN(Title) + COUNT + COUNT(DISTINCT UserID).
 //!
-//! ClickHouse-style incremental aggregation — never materialize O(rows) `(phrase, user)` pairs
-//! on top of the warm-serve column cache (~30 GiB on 100M).
-//!
-//! Pass 1: sharded `phrase_hash → count` only (O(distinct phrases)).
-//! Pass 2: rescan; for top-K phrase hashes only — `UniqExact`-style user sets + MIN via row indices.
+//! Streams one column file at a time from disk — never loads URL+Title+SearchPhrase into the
+//! warm-serve cache (~20 GiB decoded on 100M). ClickHouse-style: filter mask, count pass, then
+//! late materialization for top-K groups only.
+
+use std::path::Path;
 
 use ahash::{AHashMap, AHashSet};
 
 use crate::sql::{projection_label, ParsedQuery, SelectItemKind};
-use crate::storage::{ColumnData, Table};
+use crate::storage::column_stream::{Int64ColumnScan, Utf8ColumnScan};
+use crate::storage::Database;
 use crate::Result;
 
 use super::agg_heap::top_counts;
@@ -19,36 +20,36 @@ use super::QueryResult;
 const PARALLEL_THRESHOLD: usize = 250_000;
 const COUNT_SHARDS: usize = 256;
 
-#[inline]
-fn q23_row_matches(
-    phrases: &crate::storage::Utf8Column,
-    urls: &crate::storage::Utf8Column,
-    titles: &crate::storage::Utf8Column,
-    i: usize,
-) -> bool {
-    if phrases.get(i).is_empty() {
-        return false;
+const Q23_COLS: &[&str] = &["URL", "Title", "SearchPhrase", "UserID"];
+
+pub fn try_fused_q23_streaming(db: &mut Database, parsed: &ParsedQuery) -> Result<Option<QueryResult>> {
+    if !is_q23_shape(parsed) {
+        return Ok(None);
     }
-    let t = titles.get(i).as_bytes();
-    if memchr::memmem::find(t, b"Google").is_none() {
-        return false;
-    }
-    !memchr::memmem::find(urls.get(i).as_bytes(), b".google.").is_some()
+
+    let table = db.ensure_hits_meta()?;
+    table.drop_columns(Q23_COLS);
+
+    let row_count = table.row_count() as usize;
+    let col_dir = table.path.join("columns");
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+
+    let rows = q23_execute_streaming(&col_dir, row_count, limit, offset)?;
+
+    Ok(Some(QueryResult { columns, rows }))
 }
 
-pub fn try_fused_q23(
-    table: &Table,
-    parsed: &ParsedQuery,
-    row_count: usize,
-) -> Result<Option<QueryResult>> {
+fn is_q23_shape(parsed: &ParsedQuery) -> bool {
     if parsed.group_by.len() != 1 {
-        return Ok(None);
+        return false;
     }
     let sqlparser::ast::Expr::Identifier(id) = &parsed.group_by[0] else {
-        return Ok(None);
+        return false;
     };
     if id.value != "SearchPhrase" {
-        return Ok(None);
+        return false;
     }
 
     let mut has_min_url = false;
@@ -62,33 +63,71 @@ pub fn try_fused_q23(
             SelectItemKind::CountAll | SelectItemKind::Count(_) => has_count = true,
             SelectItemKind::CountDistinct(e) if is_col(e, "UserID") => has_distinct = true,
             SelectItemKind::Column(_) => {}
-            _ => return Ok(None),
+            _ => return false,
         }
     }
-    if !has_min_url || !has_min_title || !has_count || !has_distinct {
-        return Ok(None);
+    has_min_url && has_min_title && has_count && has_distinct
+}
+
+fn is_col(e: &sqlparser::ast::Expr, name: &str) -> bool {
+    crate::sql::expr_column_name(e).as_deref() == Some(name)
+}
+
+fn build_q23_mask(col_dir: &Path, row_count: usize) -> Result<Vec<bool>> {
+    use rayon::prelude::*;
+
+    let title = Utf8ColumnScan::open(&col_dir.join("Title.col"))?;
+    let mut mask = vec![false; row_count];
+    if row_count >= PARALLEL_THRESHOLD {
+        mask.par_iter_mut()
+            .enumerate()
+            .for_each(|(i, slot)| {
+                *slot = memchr::memmem::find(title.str_at(i).as_bytes(), b"Google").is_some();
+            });
+    } else {
+        for i in 0..row_count {
+            mask[i] = memchr::memmem::find(title.str_at(i).as_bytes(), b"Google").is_some();
+        }
     }
+    drop(title);
 
-    let ColumnData::Utf8(phrases) = table.column("SearchPhrase")? else {
-        return Ok(None);
-    };
-    let ColumnData::Utf8(urls) = table.column("URL")? else {
-        return Ok(None);
-    };
-    let ColumnData::Utf8(titles) = table.column("Title")? else {
-        return Ok(None);
-    };
-    let ColumnData::Int64(users) = table.column("UserID")? else {
-        return Ok(None);
-    };
+    let url = Utf8ColumnScan::open(&col_dir.join("URL.col"))?;
+    if row_count >= PARALLEL_THRESHOLD {
+        mask.par_iter_mut()
+            .enumerate()
+            .for_each(|(i, slot)| {
+                if *slot && memchr::memmem::find(url.str_at(i).as_bytes(), b".google.").is_some() {
+                    *slot = false;
+                }
+            });
+    } else {
+        for i in 0..row_count {
+            if mask[i] && memchr::memmem::find(url.str_at(i).as_bytes(), b".google.").is_some() {
+                mask[i] = false;
+            }
+        }
+    }
+    drop(url);
 
-    let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
-    let offset = parsed.offset.unwrap_or(0) as usize;
-    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+    let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
+    if row_count >= PARALLEL_THRESHOLD {
+        mask.par_iter_mut()
+            .enumerate()
+            .for_each(|(i, slot)| {
+                if *slot && phrase.str_at(i).is_empty() {
+                    *slot = false;
+                }
+            });
+    } else {
+        for i in 0..row_count {
+            if mask[i] && phrase.str_at(i).is_empty() {
+                mask[i] = false;
+            }
+        }
+    }
+    drop(phrase);
 
-    let rows = q23_execute(phrases, urls, titles, users, row_count, limit, offset);
-
-    Ok(Some(QueryResult { columns, rows }))
+    Ok(mask)
 }
 
 type CountShards = [AHashMap<u64, u64>; COUNT_SHARDS];
@@ -108,9 +147,8 @@ fn merge_count_shards(mut a: CountShards, mut b: CountShards) -> CountShards {
 }
 
 fn pass1_phrase_counts(
-    phrases: &crate::storage::Utf8Column,
-    urls: &crate::storage::Utf8Column,
-    titles: &crate::storage::Utf8Column,
+    phrase: &Utf8ColumnScan,
+    mask: &[bool],
     row_count: usize,
 ) -> AHashMap<u64, u64> {
     use rayon::prelude::*;
@@ -122,8 +160,8 @@ fn pass1_phrase_counts(
             .fold(
                 || std::array::from_fn(|_| AHashMap::with_capacity(cap)),
                 |mut shards, i| {
-                    if q23_row_matches(phrases, urls, titles, i) {
-                        let h = hash_str(phrases.get(i));
+                    if mask[i] {
+                        let h = hash_str(phrase.str_at(i));
                         *shards[shard_idx(h)].entry(h).or_insert(0) += 1;
                     }
                     shards
@@ -136,8 +174,8 @@ fn pass1_phrase_counts(
     } else {
         let mut shards: CountShards = std::array::from_fn(|_| AHashMap::with_capacity(cap));
         for i in 0..row_count {
-            if q23_row_matches(phrases, urls, titles, i) {
-                let h = hash_str(phrases.get(i));
+            if mask[i] {
+                let h = hash_str(phrase.str_at(i));
                 *shards[shard_idx(h)].entry(h).or_insert(0) += 1;
             }
         }
@@ -153,73 +191,65 @@ fn pass1_phrase_counts(
     merged
 }
 
-struct DetailState {
-    min_url_row: u32,
-    min_title_row: u32,
-    users: AHashSet<i64>,
-    phrase: String,
-}
-
-fn pass2_phrase_detail(
-    phrases: &crate::storage::Utf8Column,
-    urls: &crate::storage::Utf8Column,
-    titles: &crate::storage::Utf8Column,
-    users: &[i64],
+fn collect_phrase_rows(
+    phrase: &Utf8ColumnScan,
+    mask: &[bool],
     row_count: usize,
     phrase_hash: u64,
-) -> DetailState {
-    let mut users_set = AHashSet::new();
-    let mut min_url_row = 0u32;
-    let mut min_title_row = 0u32;
-    let mut phrase = String::new();
-    let mut first = true;
-
+) -> (Vec<usize>, String) {
+    let mut rows = Vec::new();
+    let mut phrase_text = String::new();
     for i in 0..row_count {
-        if !q23_row_matches(phrases, urls, titles, i) {
+        if !mask[i] {
             continue;
         }
-        if hash_str(phrases.get(i)) != phrase_hash {
+        let s = phrase.str_at(i);
+        if hash_str(s) != phrase_hash {
             continue;
         }
-        if first {
-            min_url_row = i as u32;
-            min_title_row = i as u32;
-            phrase = phrases.get(i).to_string();
-            users_set.insert(users[i]);
-            first = false;
-            continue;
+        if phrase_text.is_empty() {
+            phrase_text = s.to_string();
         }
-        let url = urls.get(i);
-        if url < urls.get(min_url_row as usize) {
-            min_url_row = i as u32;
-        }
-        let title = titles.get(i);
-        if title < titles.get(min_title_row as usize) {
-            min_title_row = i as u32;
-        }
-        users_set.insert(users[i]);
+        rows.push(i);
     }
-
-    DetailState {
-        min_url_row,
-        min_title_row,
-        users: users_set,
-        phrase,
-    }
+    (rows, phrase_text)
 }
 
-fn q23_execute(
-    phrases: &crate::storage::Utf8Column,
-    urls: &crate::storage::Utf8Column,
-    titles: &crate::storage::Utf8Column,
-    users: &[i64],
+fn min_utf8_at_rows(col: &Utf8ColumnScan, rows: &[usize]) -> String {
+    let mut min: Option<&str> = None;
+    for &i in rows {
+        let s = col.str_at(i);
+        min = Some(match min {
+            None => s,
+            Some(m) if s < m => s,
+            Some(m) => m,
+        });
+    }
+    min.unwrap_or("").to_string()
+}
+
+fn distinct_users_at_rows(users: &[i64], rows: &[usize]) -> usize {
+    let mut set = AHashSet::with_capacity(rows.len().min(4096));
+    for &i in rows {
+        set.insert(users[i]);
+    }
+    set.len()
+}
+
+fn q23_execute_streaming(
+    col_dir: &Path,
     row_count: usize,
     limit: usize,
     offset: usize,
-) -> Vec<Vec<String>> {
-    let counts = pass1_phrase_counts(phrases, urls, titles, row_count);
+) -> Result<Vec<Vec<String>>> {
+    let mask = build_q23_mask(col_dir, row_count)?;
+
+    let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
+    let counts = pass1_phrase_counts(&phrase, &mask, row_count);
+    drop(phrase);
+
     if counts.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let top: Vec<(u64, u64)> = top_counts(
@@ -228,20 +258,33 @@ fn q23_execute(
         offset,
     );
 
-    top.into_iter()
-        .map(|(h, count)| {
-            let d = pass2_phrase_detail(phrases, urls, titles, users, row_count, h);
-            vec![
-                d.phrase,
-                urls.get(d.min_url_row as usize).to_string(),
-                titles.get(d.min_title_row as usize).to_string(),
-                count.to_string(),
-                d.users.len().to_string(),
-            ]
-        })
-        .collect()
-}
+    let users = Int64ColumnScan::open(&col_dir.join("UserID.col"))?;
+    let user_slice = users.as_slice();
 
-fn is_col(e: &sqlparser::ast::Expr, name: &str) -> bool {
-    crate::sql::expr_column_name(e).as_deref() == Some(name)
+    let mut out = Vec::with_capacity(top.len());
+    for (phrase_hash, count) in top {
+        let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
+        let (rows, phrase_text) = collect_phrase_rows(&phrase, &mask, row_count, phrase_hash);
+        drop(phrase);
+
+        let url = Utf8ColumnScan::open(&col_dir.join("URL.col"))?;
+        let min_url = min_utf8_at_rows(&url, &rows);
+        drop(url);
+
+        let title = Utf8ColumnScan::open(&col_dir.join("Title.col"))?;
+        let min_title = min_utf8_at_rows(&title, &rows);
+        drop(title);
+
+        let distinct = distinct_users_at_rows(user_slice, &rows);
+
+        out.push(vec![
+            phrase_text,
+            min_url,
+            min_title,
+            count.to_string(),
+            distinct.to_string(),
+        ]);
+    }
+
+    Ok(out)
 }

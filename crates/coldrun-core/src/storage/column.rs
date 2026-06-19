@@ -211,7 +211,7 @@ impl ColumnData {
     }
 }
 
-fn open_column_payload(path: &Path) -> Result<(ColumnType, Vec<u8>)> {
+pub(crate) fn open_column_payload(path: &Path) -> Result<(ColumnType, Vec<u8>)> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len() as usize;
     let data = if len > 64 * 1024 {
