@@ -177,6 +177,8 @@ ssh -i ~/Downloads/coldrun-bench.pem ubuntu@34.244.176.182 'grep -c "^\[" /data/
 
 Attach to a session: `tmux attach -t warm-cr` (Ctrl+B D to detach).
 
+**Do not** `tmux kill-session` on a running bench unless you intend to stop it. If a session already exists, attach and check progress first.
+
 ### Suggested order for publish-ready numbers
 
 1. Preflight (above)

@@ -94,6 +94,207 @@ pub(crate) fn hash_str(s: &str) -> u64 {
 }
 
 const COUNT_SHARDS: usize = 256;
+const FUSED_PARALLEL_THRESHOLD: usize = 250_000;
+
+#[derive(Default, Clone)]
+struct UserUtf8Agg {
+    count: u64,
+    phrase: String,
+    first_seen: u32,
+}
+
+#[inline]
+fn user_phrase_key(user: i64, phrase: &str) -> (i64, u64) {
+    (user, hash_str(phrase))
+}
+
+fn merge_user_utf8_maps(
+    mut a: AHashMap<(i64, u64), UserUtf8Agg>,
+    b: AHashMap<(i64, u64), UserUtf8Agg>,
+) -> AHashMap<(i64, u64), UserUtf8Agg> {
+    for (k, v) in b {
+        a.entry(k)
+            .and_modify(|e| {
+                e.count += v.count;
+                e.first_seen = e.first_seen.min(v.first_seen);
+            })
+            .or_insert(v);
+    }
+    a
+}
+
+fn add_user_utf8_row(
+    map: &mut AHashMap<(i64, u64), UserUtf8Agg>,
+    i: usize,
+    user: i64,
+    phrase: &str,
+) {
+    let key = user_phrase_key(user, phrase);
+    map.entry(key)
+        .and_modify(|e| {
+            if e.phrase == phrase {
+                e.count += 1;
+                e.first_seen = e.first_seen.min(i as u32);
+            }
+        })
+        .or_insert(UserUtf8Agg {
+            count: 1,
+            phrase: phrase.to_string(),
+            first_seen: i as u32,
+        });
+}
+
+fn parallel_user_utf8_agg<F>(
+    user_at: F,
+    phrases: &Utf8Column,
+    mask: &[bool],
+    row_count: usize,
+) -> AHashMap<(i64, u64), UserUtf8Agg>
+where
+    F: Fn(usize) -> i64 + Sync,
+{
+    let cap = (row_count / (COUNT_SHARDS * 4)).max(8);
+    if row_count >= FUSED_PARALLEL_THRESHOLD {
+        use rayon::prelude::*;
+        (0..row_count)
+            .into_par_iter()
+            .fold(
+                || AHashMap::<(i64, u64), UserUtf8Agg>::with_capacity(cap),
+                |mut map, i| {
+                    if mask.get(i).copied().unwrap_or(false) {
+                        add_user_utf8_row(&mut map, i, user_at(i), phrases.get(i));
+                    }
+                    map
+                },
+            )
+            .reduce(
+                || AHashMap::new(),
+                merge_user_utf8_maps,
+            )
+    } else {
+        let mut map = AHashMap::with_capacity(cap);
+        for i in 0..row_count {
+            if mask.get(i).copied().unwrap_or(false) {
+                add_user_utf8_row(&mut map, i, user_at(i), phrases.get(i));
+            }
+        }
+        map
+    }
+}
+
+#[derive(Default, Clone)]
+struct UserMinuteUtf8Agg {
+    count: u64,
+    phrase: String,
+}
+
+#[inline]
+fn user_minute_phrase_key(user: i64, minute: i64, phrase: &str) -> (i64, i64, u64) {
+    (user, minute, hash_str(phrase))
+}
+
+fn merge_user_minute_maps(
+    mut a: AHashMap<(i64, i64, u64), UserMinuteUtf8Agg>,
+    b: AHashMap<(i64, i64, u64), UserMinuteUtf8Agg>,
+) -> AHashMap<(i64, i64, u64), UserMinuteUtf8Agg> {
+    for (k, v) in b {
+        a.entry(k)
+            .and_modify(|e| e.count += v.count)
+            .or_insert(v);
+    }
+    a
+}
+
+fn parallel_user_minute_utf8_agg(
+    users: &[i64],
+    minutes: impl Fn(usize) -> i64 + Sync,
+    phrases: &Utf8Column,
+    mask: &[bool],
+    row_count: usize,
+) -> AHashMap<(i64, i64, u64), UserMinuteUtf8Agg> {
+    let cap = (row_count / (COUNT_SHARDS * 4)).max(8);
+    let add_row = |map: &mut AHashMap<(i64, i64, u64), UserMinuteUtf8Agg>, i: usize| {
+        let user = users[i];
+        let phrase = phrases.get(i);
+        let minute = minutes(i);
+        let key = user_minute_phrase_key(user, minute, phrase);
+        map.entry(key)
+            .and_modify(|e| {
+                if e.phrase == phrase {
+                    e.count += 1;
+                }
+            })
+            .or_insert(UserMinuteUtf8Agg {
+                count: 1,
+                phrase: phrase.to_string(),
+            });
+    };
+    if row_count >= FUSED_PARALLEL_THRESHOLD {
+        use rayon::prelude::*;
+        (0..row_count)
+            .into_par_iter()
+            .fold(
+                || AHashMap::<(i64, i64, u64), UserMinuteUtf8Agg>::with_capacity(cap),
+                |mut map, i| {
+                    if mask.get(i).copied().unwrap_or(false) {
+                        add_row(&mut map, i);
+                    }
+                    map
+                },
+            )
+            .reduce(
+                || AHashMap::new(),
+                merge_user_minute_maps,
+            )
+    } else {
+        let mut map = AHashMap::with_capacity(cap);
+        for i in 0..row_count {
+            if mask.get(i).copied().unwrap_or(false) {
+                add_row(&mut map, i);
+            }
+        }
+        map
+    }
+}
+
+fn utf8_distinct_i64_counts(
+    keys: &Utf8Column,
+    vals: &[i64],
+    mask: &[bool],
+    row_count: usize,
+) -> Vec<(String, u64)> {
+    use rayon::prelude::*;
+
+    let mut pairs: Vec<(u64, i64, String)> = (0..row_count)
+        .into_par_iter()
+        .filter(|&i| mask.get(i).copied().unwrap_or(false))
+        .map(|i| (hash_str(keys.get(i)), vals[i], keys.get(i).to_string()))
+        .collect();
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+    pairs.par_sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    let mut out: Vec<(String, u64)> = Vec::new();
+    let mut i = 0;
+    while i < pairs.len() {
+        let h = pairs[i].0;
+        let phrase = pairs[i].2.clone();
+        let mut distinct = 1u64;
+        let mut prev = pairs[i].1;
+        i += 1;
+        while i < pairs.len() && pairs[i].0 == h {
+            if pairs[i].1 != prev {
+                distinct += 1;
+                prev = pairs[i].1;
+            }
+            i += 1;
+        }
+        let _ = h;
+        out.push((phrase, distinct));
+    }
+    out
+}
 
 fn merge_count_shards(
     mut a: [AHashMap<u128, u64>; COUNT_SHARDS],
@@ -686,40 +887,37 @@ fn try_fused_int_utf8_count(
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let offset = parsed.offset.unwrap_or(0) as usize;
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
+    let user_at = |i: usize| i64_at(ic, i).unwrap_or(0);
 
     if limit < usize::MAX && orders_by_count_desc(parsed) {
-        let mut intern = super::utf8_arena::Utf8Intern::with_capacity(512);
-        let mut topk =
-            super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, usize::MAX);
-        for_each_selected(&mask, row_count, |i| {
-            if let Ok(ik) = i64_at(ic, i) {
-                let pid = intern.intern(&udata[i]);
-                topk.inc((ik, pid));
-            }
-        });
-        let rows = topk.finish_with_tie_key(
-            |(ik, pid), c| vec![ik.to_string(), intern.get(pid).to_string(), c.to_string()],
-            |(ik, pid)| format!("{:020}\t{}", ik, intern.get(*pid)),
+        let groups = parallel_user_utf8_agg(user_at, udata, &mask, row_count);
+        let rows: Vec<Vec<String>> = super::agg_heap::top_counts(
+            groups.into_iter().map(|((user, _), agg)| {
+                (
+                    agg.count,
+                    vec![
+                        user.to_string(),
+                        agg.phrase,
+                        agg.count.to_string(),
+                    ],
+                )
+            }),
+            limit,
+            offset,
         );
         return Ok(Some(QueryResult { columns, rows }));
     }
 
-    let mut groups: AHashMap<(i64, u64), (String, u64, u32)> =
-        AHashMap::with_capacity(mask.len() / 4 + 1);
-    for_each_selected(&mask, row_count, |i| {
-        if let Ok(ik) = i64_at(ic, i) {
-            let s = &udata[i];
-            let key = (ik, hash_str(s));
-            let e = groups.entry(key).or_insert_with(|| (s.to_string(), 0, i as u32));
-            if e.0.as_str() == s {
-                e.1 += 1;
-            }
-        }
-    });
-
+    let groups = parallel_user_utf8_agg(user_at, udata, &mask, row_count);
     let pairs: Vec<(u64, u32, Vec<String>)> = groups
         .into_iter()
-        .map(|((ik, _), (s, c, fs))| (c, fs, vec![ik.to_string(), s, c.to_string()]))
+        .map(|((user, _), agg)| {
+            (
+                agg.count,
+                agg.first_seen,
+                vec![user.to_string(), agg.phrase, agg.count.to_string()],
+            )
+        })
         .collect();
     if parsed.order_by.is_empty() {
         let mut sorted: Vec<(u32, Vec<String>)> =
@@ -906,57 +1104,49 @@ fn try_fused_q19(
 
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let offset = parsed.offset.unwrap_or(0) as usize;
+    let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
 
     if limit < usize::MAX && orders_by_count_desc(parsed) {
-        let mut intern = super::utf8_arena::Utf8Intern::with_capacity(limit * 32 + 1);
-        // No incremental prune: evicting keys loses exact counts on high-cardinality groups.
-        let mut topk = super::agg_topk::StreamingTopK::with_prune_factor(limit, offset, usize::MAX);
-        for_each_selected(&mask, row_count, |i| {
-            let u = users[i];
-            let minute = event_time_minute_of_hour(times[i]);
-            let pid = intern.intern(&phrases[i]);
-            topk.inc((u, minute, pid));
-        });
-        let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
-        let rows = topk.finish_with_tie_key(
-            |(u, minute, pid), count| {
-                vec![
-                    u.to_string(),
-                    minute.to_string(),
-                    intern.get(pid).to_string(),
-                    count.to_string(),
-                ]
-            },
-            |(u, minute, pid)| {
-                format!(
-                    "{:020}\t{:02}\t{}",
-                    u,
-                    minute,
-                    intern.get(*pid)
+        let groups = parallel_user_minute_utf8_agg(
+            users,
+            |i| event_time_minute_of_hour(times[i]),
+            phrases,
+            &mask,
+            row_count,
+        );
+        let rows: Vec<Vec<String>> = super::agg_heap::top_counts(
+            groups.into_iter().map(|((user, minute, _), agg)| {
+                (
+                    agg.count,
+                    vec![
+                        user.to_string(),
+                        minute.to_string(),
+                        agg.phrase,
+                        agg.count.to_string(),
+                    ],
                 )
-            },
+            }),
+            limit,
+            offset,
         );
         return Ok(Some(QueryResult { columns, rows }));
     }
 
-    let mut phrase_ids = super::utf8_arena::Utf8Intern::with_capacity(mask.len() / 4 + 1);
-    let mut groups: AHashMap<(i64, i64, u32), u64> =
-        AHashMap::with_capacity(mask.len() / 4 + 1);
-    for_each_selected(&mask, row_count, |i| {
-        let u = users[i];
-        let minute = event_time_minute_of_hour(times[i]);
-        let pid = phrase_ids.intern(&phrases[i]);
-        *groups.entry((u, minute, pid)).or_insert(0) += 1;
-    });
-
-    let out = groups.into_iter().map(|((u, minute, pid), count)| {
+    let groups = parallel_user_minute_utf8_agg(
+        users,
+        |i| event_time_minute_of_hour(times[i]),
+        phrases,
+        &mask,
+        row_count,
+    );
+    let out = groups.into_iter().map(|((user, minute, _), agg)| {
         (
-            count,
+            agg.count,
             vec![
-                u.to_string(),
+                user.to_string(),
                 minute.to_string(),
-                phrase_ids.get(pid).to_string(),
-                count.to_string(),
+                agg.phrase,
+                agg.count.to_string(),
             ],
         )
     });
@@ -1164,27 +1354,10 @@ fn try_fused_utf8_count_distinct_i64(
         return Ok(empty_result(parsed));
     };
 
-    let mut groups: AHashMap<u64, (String, AHashMap<i64, ()>)> =
-        AHashMap::with_capacity(mask.len() / 8 + 1);
-
-    for_each_selected(&mask, row_count, |i| {
-        let s = &keys[i];
-        let h = hash_str(s);
-        let v = vals[i];
-        let e = groups.entry(h).or_insert_with(|| {
-            let mut set = AHashMap::new();
-            set.insert(v, ());
-            (s.to_string(), set)
-        });
-        if e.0.as_str() == s {
-            e.1.insert(v, ());
-        }
-    });
-
-    let out = groups.into_values().map(|(k, set)| {
-        let u = set.len() as u64;
-        (u, vec![k, u.to_string()])
-    });
+    let counts = utf8_distinct_i64_counts(&keys, &vals, &mask, row_count);
+    let out = counts
+        .into_iter()
+        .map(|(phrase, u)| (u, vec![phrase, u.to_string()]));
     finish_count_sorted_legacy(parsed, out)
 }
 
