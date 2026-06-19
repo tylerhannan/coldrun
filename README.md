@@ -19,8 +19,8 @@ Coldrun is the database under test. It does not run ClickBench for other systems
 | 1. Architecture doc | Done | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | 2. MVP: load `hits`, queries 1–5 | Done | demo + Parquet (dynamic schema) |
 | 3. All 43 queries correct | Done | Demo smoke + **43/43 vs ClickHouse** on 1M Parquet ([`validation-1m.md`](docs/benchmarks/parquet/validation-1m.md)) |
-| 4. Optimize Combined score | In progress | 1M hot sum **0.84s** (0.62× ClickHouse **1.34s**) — [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md) |
-| 5. ClickBench PR | Not started | [`clickbench/coldrun/`](clickbench/coldrun/) harness |
+| 4. Optimize Combined score | In progress | 1M hot sum **0.84s** (0.62× ClickHouse **1.34s**) — [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md); **100M load + smoke done** on `c6a.4xlarge` (see below) |
+| 5. ClickBench PR | Not started | [`clickbench/coldrun/`](clickbench/coldrun/) harness — after warm bench + official `benchmark.sh` |
 
 ## Prerequisites
 
@@ -103,14 +103,25 @@ docs/benchmarks/       # committed timing + validation snapshots
 - Run standard SQL analytical queries
 - Optionally pursue ClickBench leaderboard numbers — treated as a learning exercise, not a product promise
 
+## Cloud status (100M `hits`, Jun 2026)
+
+| Item | Status |
+|------|--------|
+| **VM** | `c6a.4xlarge`, Ubuntu 24.04, `/data` |
+| **Load** | **Done** — 99,997,497 rows, **27** columns, **~32.6 GB** on disk (~20 min ingest+finalize) |
+| **Smoke** | **Pass** — Q1 **0.03s**, Q36 **85s**, Q41 **16s** (warm serve) |
+| **Loader fixes** | Streaming staging (`4365385`), u64 UTF8 offsets (`41d2268`), disk-backed offsets + progress (`e134699`) |
+| **Next** | Warm bench vs ClickHouse on 100M, then official Combined run — [`docs/CLOUD-RUN.md`](docs/CLOUD-RUN.md) |
+
 ## Next (planned)
 
 **Done on laptop:** demo + 1M Parquet **43/43** vs ClickHouse; warm-serve hot sum **0.84s** vs CH **1.34s** (**0.62×**) — [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md).
 
-1. **100M cloud load** — finish load + smoke (Q1/Q36/Q41) on AWS; streaming loader + u64 UTF8 offsets (`4365385`…`e134699`). Target **`c6a.4xlarge`** — see [`docs/CLOUD-RUN.md`](docs/CLOUD-RUN.md).
-2. **Warm bench vs ClickHouse** on 100M Parquet (`bench-serve.sh` / `bench-clickhouse-parquet.sh`) before committing Combined numbers.
-3. **Q36 / Q41** — largest 1M hot gaps (**0.13s** vs CH **0.007–0.018s**); tune further once 100M data is loaded.
-4. **ClickBench PR** — official `clickbench/coldrun/benchmark.sh` (cold + hot, load + disk size) after cloud smoke passes.
+**Done on cloud (`c6a.4xlarge`):** 100M load + smoke (Q1/Q36/Q41). Data at `COLDRUN_DATA=/data/coldrun`.
+
+1. **Warm bench vs ClickHouse** on 100M — `bench-serve.sh` + `bench-clickhouse-parquet.sh` with `--skip-load` (~**30–60 min** total; Q36 dominates coldrun time)
+2. **Q36 / Q41** — largest 1M hot gaps (**0.13s** vs CH **0.007–0.018s**); 100M smoke Q36 **~85s**, Q41 **~16s** on 4xlarge
+3. **ClickBench PR** — official `clickbench/coldrun/benchmark.sh` (cold + hot, load + disk size) — plan **several hours** for cold protocol
 
 Snapshots: [`serve-hot.md`](docs/benchmarks/demo-100k/serve-hot.md) (demo) · [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md) (1M Parquet) · per-query notes [`docs/perf/`](docs/perf/)
 
