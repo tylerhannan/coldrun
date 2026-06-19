@@ -19,7 +19,7 @@ Coldrun is the database under test. It does not run ClickBench for other systems
 | 1. Architecture doc | Done | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | 2. MVP: load `hits`, queries 1–5 | Done | demo + Parquet (dynamic schema) |
 | 3. All 43 queries correct | Done | Demo smoke + **43/43 vs ClickHouse** on 1M Parquet ([`validation-1m.md`](docs/benchmarks/parquet/validation-1m.md)) |
-| 4. Optimize Combined score | In progress | 1M hot sum **0.84s** (0.62× ClickHouse **1.34s**) — [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md); **100M load + smoke done** on `c6a.4xlarge` (see below) |
+| 4. Optimize Combined score | In progress | 1M hot sum **0.84s** (0.62× ClickHouse **1.34s**) — [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md); **100M loaded** on cloud `c6a.4xlarge`; warm re-bench after Q9/Q36/Q41 fix (`7b11f54`) |
 | 5. ClickBench PR | Not started | [`clickbench/coldrun/`](clickbench/coldrun/) harness — after warm bench + official `benchmark.sh` |
 
 ## Prerequisites
@@ -103,25 +103,72 @@ docs/benchmarks/       # committed timing + validation snapshots
 - Run standard SQL analytical queries
 - Optionally pursue ClickBench leaderboard numbers — treated as a learning exercise, not a product promise
 
-## Cloud status (100M `hits`, Jun 2026)
+## Cloud dev box (100M `hits`, Jun 2026)
 
-| Item | Status |
+Current perf VM — data already loaded; use for unattended warm + official runs.
+
+| Item | Value |
 |------|--------|
-| **VM** | `c6a.4xlarge`, Ubuntu 24.04, `/data` |
-| **Load** | **Done** — 99,997,497 rows, **27** columns, **~32.6 GB** on disk (~20 min ingest+finalize) |
-| **Smoke** | **Pass** — Q1 **0.03s**, Q36 **85s**, Q41 **16s** (warm serve) |
-| **Loader fixes** | Streaming staging (`4365385`), u64 UTF8 offsets (`41d2268`), disk-backed offsets + progress (`e134699`) |
-| **Next** | Warm bench vs ClickHouse on 100M, then official Combined run — [`docs/CLOUD-RUN.md`](docs/CLOUD-RUN.md) |
+| **Instance** | `c6a.4xlarge` (16 vCPU, 32 GiB), Ubuntu 24.04 |
+| **SSH** | `ssh -i ~/Downloads/coldrun-bench.pem ubuntu@34.244.176.182` |
+| **Repo** | `~/coldrun` — pull `main`, build with `cargo build --release -p coldrun-cli` |
+| **Parquet** | `/data/hits.parquet` (~14 GiB) |
+| **Coldrun data** | `COLDRUN_DATA=/data/coldrun` — 99,997,497 rows, **27** `.col` files, **~33 GiB** |
+| **ClickHouse** | `./scripts/install-clickhouse-local.sh` (already installed on dev box) |
+| **Query fixes** | `7b11f54` — exact sharded agg for Q9/Q36/Q41 (re-bench after pull) |
+
+Full checklist + unattended commands: [`docs/CLOUD-RUN.md`](docs/CLOUD-RUN.md)
+
+### Preflight (5 min, on the VM)
+
+```bash
+cd ~/coldrun && git pull && cargo build --release -p coldrun-cli
+export COLDRUN_ROOT=~/coldrun COLDRUN_DATA=/data/coldrun HITS_PARQUET=/data/hits.parquet
+
+# expect 27 columns, ~33G
+ls /data/coldrun/hits/columns/*.col | wc -l
+du -sh /data/coldrun
+
+# quick warm smoke (Q1)
+./clickbench/coldrun/start && sleep 2
+./clickbench/coldrun/query < <(sed -n '1p' clickbench/coldrun/queries.sql)
+./clickbench/coldrun/stop
+```
+
+### Unattended perf runs (tmux — safe to disconnect)
+
+Run **on the VM** after preflight. Logs under `/data/bench-*.log`.
+
+```bash
+# 1) Warm coldrun, all 43 queries, 3 tries (~30–90 min; Q36 is the long pole)
+tmux new-session -d -s warm-cr \
+  'cd ~/coldrun && export COLDRUN_ROOT=$PWD COLDRUN_DATA=/data/coldrun PATH=$HOME/.cargo/bin:$PATH && \
+   ./scripts/bench-serve.sh 100000000 --skip-load 2>&1 | tee /data/bench-warm-coldrun.log'
+
+# 2) Warm ClickHouse on same Parquet + compare (~15–40 min)
+tmux new-session -d -s warm-ch \
+  'cd ~/coldrun && export PATH=$HOME/.cargo/bin:$PATH && \
+   ./scripts/bench-clickhouse-parquet.sh /data/hits.parquet --compare 2>&1 | tee /data/bench-warm-ch.log'
+
+# 3) Official Combined protocol — cold restart + drop_caches per query (~4–8 h)
+tmux new-session -d -s official \
+  'cd ~/coldrun && export COLDRUN_ROOT=$PWD COLDRUN_DATA=/data/coldrun HITS_PARQUET=/data/hits.parquet && \
+   COLDRUN_SKIP_LOAD=1 ./clickbench/coldrun/benchmark.sh 2>&1 | tee /data/bench-official.log'
+```
+
+Monitor from your laptop:
+
+```bash
+ssh -i ~/Downloads/coldrun-bench.pem ubuntu@34.244.176.182 'tmux ls; tail -3 /data/bench-warm-coldrun.log'
+```
+
+Artifacts when done: `logs/benchmarks/serve-last.log`, `clickbench/coldrun/result.csv`, `clickbench/coldrun/clickhouse-result.csv`, `/data/bench-*.log`.
 
 ## Next (planned)
 
 **Done on laptop:** demo + 1M Parquet **43/43** vs ClickHouse; warm-serve hot sum **0.84s** vs CH **1.34s** (**0.62×**) — [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md).
 
-**Done on cloud (`c6a.4xlarge`):** 100M load + smoke (Q1/Q36/Q41). Data at `COLDRUN_DATA=/data/coldrun`.
-
-1. **Warm bench vs ClickHouse** on 100M — `bench-serve.sh` + `bench-clickhouse-parquet.sh` with `--skip-load` (~**30–60 min** total; Q36 dominates coldrun time)
-2. **Q36 / Q41** — largest 1M hot gaps (**0.13s** vs CH **0.007–0.018s**); 100M smoke Q36 **~85s**, Q41 **~16s** on 4xlarge
-3. **ClickBench PR** — official `clickbench/coldrun/benchmark.sh` (cold + hot, load + disk size) — plan **several hours** for cold protocol
+**Done on cloud:** 100M load; loader fixes (streaming staging, u64 UTF8 offsets). **In flight:** warm re-bench after `7b11f54`, then official `benchmark.sh` for Combined score + ClickBench PR.
 
 Snapshots: [`serve-hot.md`](docs/benchmarks/demo-100k/serve-hot.md) (demo) · [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md) (1M Parquet) · per-query notes [`docs/perf/`](docs/perf/)
 
