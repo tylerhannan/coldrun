@@ -90,7 +90,7 @@ Run on the VM every time you pull new code:
 cd ~/coldrun
 git pull
 cargo build --release -p coldrun-cli
-git rev-parse --short HEAD    # record in log / PR
+git rev-parse --short HEAD    # record in log / PR — expect 18d7641+ for Q23 fix
 
 export COLDRUN_ROOT="$PWD"
 export COLDRUN_DATA=/data/coldrun
@@ -121,12 +121,20 @@ Use **tmux** so SSH disconnect does not kill long jobs. Logs go to `/data/bench-
 
 ### 1. Warm coldrun (hot-shaped, no per-query restart)
 
-All 43 queries × 3 tries. Expect **~30–90 min** (Q36 dominates).
+All 43 queries × 3 tries. Expect **~30–90 min** (Q21 URL scan and Q36 sort are long poles).
 
 ```bash
 tmux new-session -d -s warm-cr \
   'cd ~/coldrun && export COLDRUN_ROOT=$PWD COLDRUN_DATA=/data/coldrun PATH=$HOME/.cargo/bin:$PATH && \
    ./scripts/bench-serve.sh 100000000 --skip-load 2>&1 | tee /data/bench-warm-coldrun.log'
+```
+
+Resume from a query after a crash (fresh serve loads new binary):
+
+```bash
+tmux new-session -d -s rebench-tail \
+  'cd ~/coldrun && export COLDRUN_ROOT=$PWD COLDRUN_DATA=/data/coldrun PATH=$HOME/.cargo/bin:$PATH && \
+   ./scripts/bench-serve.sh 100000000 --skip-load --from 23 2>&1 | tee /data/bench-rebench-tail.log'
 ```
 
 Output: `logs/benchmarks/serve-last.log`, `clickbench/coldrun/result.csv`
@@ -222,6 +230,8 @@ scp -i ~/Downloads/coldrun-bench.pem \
 | `benchmark.sh` hangs | `./check`, stale `serve.pid`, `tmux attach -t official` |
 | Cold times flat vs hot | `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'` must succeed |
 | Query wrong vs CH | Re-run validate on 1M slice; fix before trusting 100M |
+| Bench dies at Q23 | Pre-`18d7641`: OOM from per-phrase `AHashSet` — pull `18d7641+`, rebuild, restart with `--from 23` |
+| Serve RSS >25 GiB on Q23 | Same — use sort-based two-phase path in `group_fused_q23.rs` |
 | `ls *.col` count 0 | Columns live under `$COLDRUN_DATA/hits/columns/`, not data root |
 | tmux session gone | Job died — check end of `/data/bench-*.log` for error |
 

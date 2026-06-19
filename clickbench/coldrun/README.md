@@ -45,6 +45,8 @@ On a laptop, use synthetic data instead:
 ./scripts/bench-clickbench.sh --demo 100000 --embedded  # ClickBench output (serve + 3×/query)
 ```
 
-See [`docs/PERF.md`](../../docs/PERF.md) for optimization notes and committed bench snapshots in [`docs/benchmarks/`](../../docs/benchmarks/).
+See [`docs/PERF.md`](../../docs/PERF.md) for optimization notes (including **100M sort-based aggregation** in `agg_sort.rs`) and committed bench snapshots in [`docs/benchmarks/`](../../docs/benchmarks/).
+
+Per-query implementation notes: [`docs/perf/`](../../docs/perf/) (maintained for fused-path queries; see PERF.md for current 100M strategy).
 
 Full **100M cloud run:** [`docs/CLOUD-RUN.md`](../../docs/CLOUD-RUN.md).

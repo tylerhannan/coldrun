@@ -21,7 +21,40 @@ COLDRUN_DATA=.coldrun-validate-hits-1m_ ./scripts/bench-serve.sh 1000000 --skip-
 ./scripts/bench-clickhouse-parquet.sh data/hits-1m.parquet --write-snapshot --compare
 ```
 
-Laptop numbers only — not ClickBench Combined (no cold protocol, no 100M rows, no `c6a.4xlarge`). On this 1M slice coldrun is **~0.63×** ClickHouse hot sum. Largest remaining gaps vs CH: **Q36**, **Q41** (coldrun slower on full scan / dashboard agg); warm CH server compare on cloud.
+Laptop numbers only — not ClickBench Combined (no cold protocol, no 100M rows, no `c6a.4xlarge`). On this 1M slice coldrun is **~0.63×** ClickHouse hot sum. Largest remaining gaps vs CH on 1M: **Q36**, **Q41** (addressed on 100M via sort-based paths in `agg_sort.rs`).
+
+## 100M cloud warm (c6a.4xlarge, Jun 2026)
+
+Partial warm-serve results before Q23 crash fix (`rebench-v2`, commit `0a65cf6`). Full re-run in progress after `18d7641`.
+
+| Metric | Coldrun (hot, min tries 2–3) | ClickHouse (official hot) |
+|--------|--------------------------------|---------------------------|
+| Q1–22 sum | **~46s** | ~9.6s (Q1–20 ref) |
+| Q17 | 3.2s (was 12s) | 1.5s |
+| Q18 | 1.2s (was 21s) | 0.8s |
+| Q19 | 3.5s (was 27s) | 3.0s |
+| Q14 | 9.2s | 0.8s |
+| Q36 / Q41 | pending re-bench | 0.27s / 0.02s |
+
+Runbook: [`CLOUD-RUN.md`](CLOUD-RUN.md). Monitor: `grep -c "^\[" /data/bench-rebench-tail.log` (43 = done).
+
+## Sort-based aggregation (`agg_sort.rs`, Jun 2026)
+
+For 100M rows, hash maps with millions of groups or per-group `AHashSet` OOM or stall. Replacement pattern:
+
+1. **Collect** `(key, …)` pairs for filtered rows (parallel when ≥250k rows).
+2. **Sort** + run-length counts; min-heap for top-K by count.
+3. **Second pass** (when needed) only for top-K keys — e.g. Q23 `MIN(URL)` / `MIN(Title)`.
+
+| Query | Module | Notes |
+|-------|--------|-------|
+| Q9 | `group_direct.rs` | Sort `(RegionID, UserID)` for COUNT DISTINCT |
+| Q14 | `group_fused.rs` | Sort `(phrase_hash, UserID)` for COUNT DISTINCT |
+| Q17, Q19 | `group_fused.rs` | Sort user+phrase / user+minute+phrase pairs |
+| Q18 | `group_fused.rs` | Track first LIMIT distinct groups only (no ORDER BY) |
+| Q23 | `group_fused_q23.rs` | Two-phase: sort `(phrase_hash, UserID)`, then min URL/title for top 10 |
+| Q36 | `group_columnar.rs` | Sort ClientIP u32 values |
+| Q41 | `group_columnar.rs` | Collect zone-matching URLHash+EventDate keys, sort, top-K |
 
 ## Local benchmarking (demo)
 
@@ -65,7 +98,8 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | **Demo near-unique GROUP BY** | `TableMeta::demo_near_unique` + O(limit) scan (`group_near_unique.rs`, Q19/Q35/Q36) |
 | **Q40 CASE fused** | Dashboard + CASE referer + URL without interpreter (`group_fused_q40.rs`) |
 | **Sharded int-pair GROUP BY** | 256-way shards for Q31–33 (`column_slice.rs`) |
-| **Fused SearchPhrase aggs** | Q11/Q22/Q23 (`group_fused_q11.rs`, `group_fused_q22.rs`, `group_fused_q23.rs`) |
+| **Fused SearchPhrase aggs** | Q11/Q22 (`group_fused_q11.rs`, `group_fused_q22.rs`); Q23 two-phase sort (`group_fused_q23.rs`) |
+| **Sort-based top-K @ 100M** | `agg_sort.rs` — Q9, Q14, Q17–Q19, Q23, Q36, Q41 (see above) |
 | **Streaming top-K scaffold** | `agg_topk.rs` wired for utf8 COUNT with LIMIT (non-demo) |
 | **`PodStorage` / Arc numerics** | Shared POD buffers after column read (`storage/pod.rs`) |
 | **Q24 partial sort** | `select_nth_unstable` for ORDER BY EventTime LIMIT scan |
@@ -134,12 +168,16 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | parquet 1M | SIMD zone scan, streaming top-K Q36/Q41 — serve-hot **0.84s** — [`compare-hot.md`](benchmarks/parquet-hits-1m/compare-hot.md) (0.62× CH **1.34s**) |
 | **Columnar GROUP BY scan** | Q36 ClientIP chunks + Q41 referer-led slices (`group_columnar.rs`, `simd_scan.rs`) — no 1M bool mask |
 | Q41 / Q36 pass | SIMD referer prefilter, parallel streaming top-K — [`compare-hot.md`](benchmarks/parquet-hits-1m/compare-hot.md) (0.62× CH **1.34s**); Q36 **0.133s**, Q41 **0.131s** |
-| columnar pass | Fused columnar Q36/Q41 — correctness ✓; Q36/Q41 ~0.13s each (was ~0.22s) |
+| columnar pass | Fused columnar Q36/Q41 — correctness ✓; Q36/Q41 ~0.13s each on 1M (was ~0.22s) |
+| **100M sort agg** | `4965730` — `agg_sort.rs`; Q36/Q41 sort paths; Q17/Q19 sort top-K |
+| **100M Q14/Q18** | `0a65cf6` — Q14 hash-only distinct sort; Q18 first-LIMIT-groups |
+| **100M Q23 fix** | `18d7641` — two-phase sort; fixes OOM kill at Q23 on 32 GiB VM |
 
 ## Next (planned)
 
-1. **ClickBench cloud baseline** — first Combined run on `c6a.4xlarge` (stop optimizing 1M hot sum)
-2. **Q36 / Q41** — only if cloud profile shows same gap; needs vectorized agg not map tuning
+1. **Finish 100M warm bench** — Q23–43 after `18d7641`, then ClickHouse compare on same VM
+2. **Official Combined** — `benchmark.sh` with `drop_caches` (~4–8 h)
+3. **Q14** — still ~10× CH on 100M; may need phrase-level sort + tighter filter pushdown
 
 ## Honest scope
 

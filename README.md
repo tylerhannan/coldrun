@@ -19,7 +19,7 @@ Coldrun is the database under test. It does not run ClickBench for other systems
 | 1. Architecture doc | Done | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | 2. MVP: load `hits`, queries 1–5 | Done | demo + Parquet (dynamic schema) |
 | 3. All 43 queries correct | Done | Demo smoke + **43/43 vs ClickHouse** on 1M Parquet ([`validation-1m.md`](docs/benchmarks/parquet/validation-1m.md)) |
-| 4. Optimize Combined score | In progress | 1M hot sum **0.84s** (0.62× ClickHouse **1.34s**) — [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md); **100M loaded** on cloud `c6a.4xlarge`; warm re-bench after Q9/Q36/Q41 fix (`7b11f54`) |
+| 4. Optimize Combined score | In progress | 1M hot sum **0.84s** (0.62× CH **1.34s**); **100M warm** on cloud `c6a.4xlarge` — sort-based agg for Q9/Q14/Q17–Q19/Q36/Q41, Q23 two-phase fix (`18d7641`); partial warm **~46s** Q1–22 hot |
 | 5. ClickBench PR | Not started | [`clickbench/coldrun/`](clickbench/coldrun/) harness — after warm bench + official `benchmark.sh` |
 
 ## Prerequisites
@@ -115,7 +115,7 @@ Current perf VM — data already loaded; use for unattended warm + official runs
 | **Parquet** | `/data/hits.parquet` (~14 GiB) |
 | **Coldrun data** | `COLDRUN_DATA=/data/coldrun` — 99,997,497 rows, **27** `.col` files, **~33 GiB** |
 | **ClickHouse** | `./scripts/install-clickhouse-local.sh` (already installed on dev box) |
-| **Query fixes** | `7b11f54` — exact sharded agg for Q9/Q36/Q41 (re-bench after pull) |
+| **Query fixes** | `18d7641` — sort-based top-K + Q23 two-phase (see [`docs/PERF.md`](docs/PERF.md)) |
 
 Full checklist + unattended commands: [`docs/CLOUD-RUN.md`](docs/CLOUD-RUN.md)
 
@@ -168,7 +168,7 @@ Artifacts when done: `logs/benchmarks/serve-last.log`, `clickbench/coldrun/resul
 
 **Done on laptop:** demo + 1M Parquet **43/43** vs ClickHouse; warm-serve hot sum **0.84s** vs CH **1.34s** (**0.62×**) — [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md).
 
-**Done on cloud:** 100M load; loader fixes (streaming staging, u64 UTF8 offsets). **In flight:** warm re-bench after `7b11f54`, then official `benchmark.sh` for Combined score + ClickBench PR.
+**Done on cloud:** 100M load; loader fixes (streaming staging, u64 UTF8 offsets). **In flight:** warm bench Q23–43 (`rebench-tail` tmux), then ClickHouse compare + official `benchmark.sh` for Combined score + ClickBench PR.
 
 Snapshots: [`serve-hot.md`](docs/benchmarks/demo-100k/serve-hot.md) (demo) · [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md) (1M Parquet) · per-query notes [`docs/perf/`](docs/perf/)
 
