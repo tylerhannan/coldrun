@@ -89,6 +89,10 @@ bench_run_query() {
     ./start >/dev/null 2>&1 || true
     bench_check_loop
   else
+    if ! ./check >/dev/null 2>&1; then
+      ./start >/dev/null 2>&1 || true
+      bench_check_loop
+    fi
     bench_flush_caches
   fi
 

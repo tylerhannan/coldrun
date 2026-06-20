@@ -32,6 +32,7 @@ mod topk;
 mod utf8_arena;
 mod scan;
 mod scan_fast;
+mod scan_stream;
 
 use crate::sql::{parse_query, projection_label};
 use crate::storage::ColumnData;

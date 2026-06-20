@@ -89,8 +89,18 @@ fn try_scan_single_order(
 
     let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
     let col = table.column(sel_name)?;
-    let mut indices = select_indices_for_where(table, parsed.where_expr.as_ref(), row_count, &mask)?;
-    partial_or_full_sort_indices(col, &mut indices, parsed, *desc);
+    let indices = if need > 0 && need < row_count {
+        if let ColumnData::Utf8(v) = col {
+            streaming_topk_utf8_from_mask(v, row_count, need, *desc, &mask)
+        } else {
+            streaming_topk_from_mask(col, row_count, need, *desc, &mask)
+        }
+    } else {
+        let mut indices =
+            select_indices_for_where(table, parsed.where_expr.as_ref(), row_count, &mask)?;
+        partial_or_full_sort_indices(col, &mut indices, parsed, *desc);
+        indices
+    };
     Ok(Some(build_scan_result(
         proj,
         col,
@@ -139,8 +149,17 @@ fn try_scan_order_different_col(
     }
 
     let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
-    let mut indices = select_indices_for_where(table, parsed.where_expr.as_ref(), row_count, &mask)?;
-    partial_or_full_sort_indices(order_col, &mut indices, parsed, *desc);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(row_count);
+    let need = offset.saturating_add(limit);
+    let indices = if need > 0 && need < row_count {
+        streaming_topk_from_mask(order_col, row_count, need, *desc, &mask)
+    } else {
+        let mut indices =
+            select_indices_for_where(table, parsed.where_expr.as_ref(), row_count, &mask)?;
+        partial_or_full_sort_indices(order_col, &mut indices, parsed, *desc);
+        indices
+    };
     Ok(Some(build_scan_result(proj, sel_col, &indices, parsed)?))
 }
 
@@ -192,8 +211,17 @@ fn try_scan_two_order(
     }
 
     let mask = build_filter_mask(table, parsed.where_expr.as_ref(), row_count)?;
-    let mut indices = select_indices_for_where(table, parsed.where_expr.as_ref(), row_count, &mask)?;
-    partial_or_full_sort_indices_two(col1, col2, &mut indices, parsed, *d1, *d2);
+    let offset = parsed.offset.unwrap_or(0) as usize;
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(row_count);
+    let need = offset.saturating_add(limit);
+    let indices = if need > 0 && need < row_count {
+        streaming_topk_two_from_mask(col1, col2, row_count, need, *d1, *d2, &mask)
+    } else {
+        let mut indices =
+            select_indices_for_where(table, parsed.where_expr.as_ref(), row_count, &mask)?;
+        partial_or_full_sort_indices_two(col1, col2, &mut indices, parsed, *d1, *d2);
+        indices
+    };
 
     let out_col = table.column(sel_name)?;
     Ok(Some(build_scan_result(proj, out_col, &indices, parsed)?))
@@ -224,18 +252,20 @@ fn try_scan_star_like_order_limit(
         return Ok(None);
     };
     let pattern = url_like_pattern(where_expr)?;
-    let mut indices = indices_from_utf8_like(urls, &pattern, row_count);
     let time_col = table.column("EventTime")?;
 
     let offset = parsed.offset.unwrap_or(0) as usize;
-    let limit = parsed.limit.map(|l| l as usize).unwrap_or(indices.len());
+    let limit = parsed.limit.map(|l| l as usize).unwrap_or(row_count);
     let need = offset.saturating_add(limit);
-    if need > 0 && need < indices.len() {
-        partial_sort_indices_by_timestamp(time_col, &mut indices, need);
-        indices.truncate(need);
+
+    let indices = if need > 0 && need < row_count {
+        streaming_topk_url_like_loaded(urls, time_col, row_count, need, &pattern)
     } else {
-        sort_indices_by_column(time_col, &mut indices, false);
-    }
+        let mut all = indices_from_utf8_like(urls, &pattern, row_count);
+        sort_indices_by_column(time_col, &mut all, false);
+        all
+    };
+
     let slice: Vec<usize> = indices.into_iter().skip(offset).take(limit).collect();
 
     let (names, rows) = table.project_rows(&slice)?;
@@ -243,7 +273,7 @@ fn try_scan_star_like_order_limit(
     Ok(Some(QueryResult { columns: names, rows }))
 }
 
-fn where_is_url_like(expr: &Expr) -> bool {
+pub(crate) fn where_is_url_like(expr: &Expr) -> bool {
     match expr {
         Expr::Like {
             expr: inner,
@@ -414,7 +444,7 @@ fn build_scan_result(
     })
 }
 
-fn url_like_pattern(expr: &Expr) -> Result<String> {
+pub(crate) fn url_like_pattern(expr: &Expr) -> Result<String> {
     match expr {
         Expr::Like { pattern, .. } => match &**pattern {
             Expr::Value(Value::SingleQuotedString(s))
@@ -430,6 +460,156 @@ fn indices_from_utf8_like(data: &Utf8Column, pattern: &str, row_count: usize) ->
     (0..row_count)
         .filter(|&i| eval_like_match(data.get(i), pattern))
         .collect()
+}
+
+/// Top-K row indices by EventTime among URL LIKE matches — no full match list (Q24 in-cache path).
+fn streaming_topk_url_like_loaded(
+    urls: &Utf8Column,
+    time_col: &ColumnData,
+    row_count: usize,
+    need: usize,
+    pattern: &str,
+) -> Vec<usize> {
+    streaming_topk_from_mask_with(row_count, need, false, |i| {
+        eval_like_match(urls.get(i), pattern)
+    }, |i| key_i64_at(time_col, i))
+}
+
+fn streaming_topk_from_mask(
+    order_col: &ColumnData,
+    row_count: usize,
+    need: usize,
+    desc: bool,
+    mask: &[bool],
+) -> Vec<usize> {
+    streaming_topk_from_mask_with(row_count, need, desc, |i| mask[i], |i| key_i64_at(order_col, i))
+}
+
+fn streaming_topk_utf8_from_mask(
+    v: &Utf8Column,
+    row_count: usize,
+    need: usize,
+    desc: bool,
+    mask: &[bool],
+) -> Vec<usize> {
+    streaming_topk_utf8(v, row_count, need, desc, |i| mask[i])
+}
+
+fn streaming_topk_two_from_mask(
+    col1: &ColumnData,
+    col2: &ColumnData,
+    row_count: usize,
+    need: usize,
+    desc1: bool,
+    desc2: bool,
+    mask: &[bool],
+) -> Vec<usize> {
+    use std::collections::BinaryHeap;
+
+    if need == 0 {
+        return Vec::new();
+    }
+    let mut heap: BinaryHeap<(TopTwoKey, usize)> = BinaryHeap::new();
+    for i in 0..row_count {
+        if !mask[i] {
+            continue;
+        }
+        let key = TopTwoKey::new(key_i64_at(col1, i), key_str_at(col2, i), desc1, desc2);
+        if heap.len() < need {
+            heap.push((key, i));
+        } else if let Some((worst, _)) = heap.peek() {
+            if key < *worst {
+                heap.pop();
+                heap.push((key, i));
+            }
+        }
+    }
+    let mut v: Vec<_> = heap.into_iter().collect();
+    v.sort_by(|(ka, a), (kb, b)| {
+        let ord = ka.cmp(kb);
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+        a.cmp(b)
+    });
+    v.into_iter().map(|(_, i)| i).collect()
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct TopTwoKey(i64, u64, bool, bool);
+
+impl TopTwoKey {
+    fn new(k1: i64, s: &str, desc1: bool, desc2: bool) -> Self {
+        Self(k1, hash_str(s), desc1, desc2)
+    }
+}
+
+impl Ord for TopTwoKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let o1 = if self.2 {
+            other.0.cmp(&self.0)
+        } else {
+            self.0.cmp(&other.0)
+        };
+        if o1 != std::cmp::Ordering::Equal {
+            return o1;
+        }
+        if self.3 {
+            other.1.cmp(&self.1)
+        } else {
+            self.1.cmp(&other.1)
+        }
+    }
+}
+
+impl PartialOrd for TopTwoKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn hash_str(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = ahash::AHasher::default();
+    s.hash(&mut h);
+    h.finish()
+}
+
+fn key_i64_at(col: &ColumnData, row: usize) -> i64 {
+    match col {
+        ColumnData::Timestamp(v) | ColumnData::Int64(v) => v[row],
+        ColumnData::Int32(v) => v[row] as i64,
+        ColumnData::Int16(v) => v[row] as i64,
+        ColumnData::Date(v) => v[row] as i64,
+        ColumnData::Utf8(v) => {
+            let s = v.get(row);
+            s.parse().unwrap_or(0)
+        }
+    }
+}
+
+fn key_str_at(col: &ColumnData, row: usize) -> &str {
+    match col {
+        ColumnData::Utf8(v) => v.get(row),
+        _ => "",
+    }
+}
+
+fn streaming_topk_from_mask_with(
+    row_count: usize,
+    need: usize,
+    desc: bool,
+    row_ok: impl Fn(usize) -> bool,
+    key_at: impl Fn(usize) -> i64,
+) -> Vec<usize> {
+    let mut heap: BinaryHeap<(i64, usize)> = BinaryHeap::new();
+    for i in 0..row_count {
+        if !row_ok(i) {
+            continue;
+        }
+        push_topk_i64(&mut heap, need, desc, key_at(i), i);
+    }
+    finish_topk_i64_heap(heap, desc)
 }
 
 fn partial_or_full_sort_indices(

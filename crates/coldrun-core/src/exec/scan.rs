@@ -10,6 +10,10 @@ use super::scan_fast::try_execute_scan_fast;
 use super::QueryResult;
 
 pub fn execute_scan(db: &mut Database, parsed: &ParsedQuery) -> Result<QueryResult> {
+    if let Some(result) = super::scan_stream::try_execute_q24_streaming(db, parsed)? {
+        return Ok(result);
+    }
+
     let table = db.open_table_for_query("hits", parsed)?;
     let row_count = table.row_count() as usize;
 
