@@ -130,18 +130,9 @@ fn build_q23_mask(col_dir: &Path, row_count: usize) -> Result<Vec<bool>> {
     Ok(mask)
 }
 
-type CountShards = [AHashMap<u64, u64>; COUNT_SHARDS];
-
-#[inline]
-fn shard_idx(h: u64) -> usize {
-    h as usize % COUNT_SHARDS
-}
-
-fn merge_count_shards(mut a: CountShards, mut b: CountShards) -> CountShards {
-    for i in 0..COUNT_SHARDS {
-        for (k, v) in b[i].drain() {
-            *a[i].entry(k).or_insert(0) += v;
-        }
+fn merge_phrase_counts(mut a: AHashMap<u64, u64>, b: AHashMap<u64, u64>) -> AHashMap<u64, u64> {
+    for (k, v) in b {
+        *a.entry(k).or_insert(0) += v;
     }
     a
 }
@@ -154,41 +145,30 @@ fn pass1_phrase_counts(
     use rayon::prelude::*;
 
     let cap = (row_count / (COUNT_SHARDS * 8)).max(4);
-    let shards = if row_count >= PARALLEL_THRESHOLD {
+    if row_count >= PARALLEL_THRESHOLD {
         (0..row_count)
             .into_par_iter()
             .fold(
-                || std::array::from_fn(|_| AHashMap::with_capacity(cap)),
-                |mut shards, i| {
+                || AHashMap::with_capacity(cap),
+                |mut map, i| {
                     if mask[i] {
                         let h = hash_str(phrase.str_at(i));
-                        *shards[shard_idx(h)].entry(h).or_insert(0) += 1;
+                        *map.entry(h).or_insert(0) += 1;
                     }
-                    shards
+                    map
                 },
             )
-            .reduce(
-                || std::array::from_fn(|_| AHashMap::new()),
-                merge_count_shards,
-            )
+            .reduce(|| AHashMap::new(), merge_phrase_counts)
     } else {
-        let mut shards: CountShards = std::array::from_fn(|_| AHashMap::with_capacity(cap));
+        let mut map = AHashMap::with_capacity(cap);
         for i in 0..row_count {
             if mask[i] {
                 let h = hash_str(phrase.str_at(i));
-                *shards[shard_idx(h)].entry(h).or_insert(0) += 1;
+                *map.entry(h).or_insert(0) += 1;
             }
         }
-        shards
-    };
-
-    let mut merged = AHashMap::with_capacity(cap * COUNT_SHARDS);
-    for mut m in shards {
-        for (k, v) in m.drain() {
-            *merged.entry(k).or_insert(0) += v;
-        }
+        map
     }
-    merged
 }
 
 fn collect_phrase_rows(

@@ -8,8 +8,6 @@ HOST="${COLDRUN_HOST:-127.0.0.1:9000}"
 PID_FILE="${COLDRUN_PID_FILE:-$DATA_DIR/serve.pid}"
 
 test -f "$DATA_DIR/manifest.json"
-test -f "$PID_FILE"
-kill -0 "$(cat "$PID_FILE")"
 
 host="${HOST%:*}"
 port="${HOST##*:}"
