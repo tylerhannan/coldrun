@@ -1,5 +1,7 @@
 //! Disk-streaming scan kernels — one column decode at a time, no warm-cache blowup.
 
+use std::collections::HashSet;
+
 use crate::expr::eval_like_match;
 use crate::sql::q24_narrow_load;
 use crate::sql::ParsedQuery;
@@ -43,6 +45,9 @@ pub fn try_execute_q24_streaming(
     let indices = streaming_topk_url_like(&url, &times, row_count, need, &pattern);
     drop(url);
     drop(times);
+
+    // Release any decoded columns before projecting SELECT * (one LZ4 decode at a time).
+    table.retain_columns(&HashSet::new());
 
     let slice: Vec<usize> = indices.into_iter().skip(offset).take(limit).collect();
     let (names, rows) = table.project_rows(&slice)?;

@@ -214,13 +214,16 @@ impl ColumnData {
 pub(crate) fn open_column_payload(path: &Path) -> Result<(ColumnType, Vec<u8>)> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len() as usize;
-    let data = if len > 64 * 1024 {
-        unsafe { memmap2::Mmap::map(&file)? }.to_vec()
-    } else {
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)?;
-        buf
-    };
+    if len > 64 * 1024 {
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        return decode_column_payload_from_bytes(&mmap);
+    }
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)?;
+    decode_column_payload_from_bytes(&data)
+}
+
+fn decode_column_payload_from_bytes(data: &[u8]) -> Result<(ColumnType, Vec<u8>)> {
     if data.len() < 5 {
         return Err(crate::Error::msg("column file too short"));
     }

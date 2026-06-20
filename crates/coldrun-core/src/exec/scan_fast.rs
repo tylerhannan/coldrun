@@ -268,6 +268,7 @@ fn try_scan_star_like_order_limit(
 
     let slice: Vec<usize> = indices.into_iter().skip(offset).take(limit).collect();
 
+    table.retain_columns(&std::collections::HashSet::new());
     let (names, rows) = table.project_rows(&slice)?;
 
     Ok(Some(QueryResult { columns: names, rows }))
