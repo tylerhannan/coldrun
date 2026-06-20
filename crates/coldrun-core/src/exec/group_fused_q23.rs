@@ -1,8 +1,8 @@
 //! Q23: SearchPhrase + MIN(URL) + MIN(Title) + COUNT + COUNT(DISTINCT UserID).
 //!
 //! Streams one column file at a time from disk — never loads URL+Title+SearchPhrase into the
-//! warm-serve cache (~20 GiB decoded on 100M). ClickHouse-style: filter mask, count pass, then
-//! late materialization for top-K groups only.
+//! warm-serve cache (~20 GiB decoded on 100M). Seven column decompresses total: Title+URL mask,
+//! SearchPhrase filter+count, UserID, then one batched pass2 (SearchPhrase+URL+Title) for top-K.
 
 use std::path::Path;
 
@@ -109,7 +109,17 @@ fn build_q23_mask(col_dir: &Path, row_count: usize) -> Result<Vec<bool>> {
     }
     drop(url);
 
-    let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
+    Ok(mask)
+}
+
+fn pass1_phrase_filter_and_counts(
+    phrase: &Utf8ColumnScan,
+    mask: &mut [bool],
+    row_count: usize,
+) -> AHashMap<u64, u64> {
+    use rayon::prelude::*;
+
+    let cap = (row_count / (COUNT_SHARDS * 8)).max(4);
     if row_count >= PARALLEL_THRESHOLD {
         mask.par_iter_mut()
             .enumerate()
@@ -118,16 +128,23 @@ fn build_q23_mask(col_dir: &Path, row_count: usize) -> Result<Vec<bool>> {
                     *slot = false;
                 }
             });
+        pass1_phrase_counts(phrase, mask, row_count)
     } else {
+        let mut map = AHashMap::with_capacity(cap);
         for i in 0..row_count {
-            if mask[i] && phrase.str_at(i).is_empty() {
-                mask[i] = false;
+            if !mask[i] {
+                continue;
             }
+            let s = phrase.str_at(i);
+            if s.is_empty() {
+                mask[i] = false;
+                continue;
+            }
+            let h = hash_str(s);
+            *map.entry(h).or_insert(0) += 1;
         }
+        map
     }
-    drop(phrase);
-
-    Ok(mask)
 }
 
 fn merge_phrase_counts(mut a: AHashMap<u64, u64>, b: AHashMap<u64, u64>) -> AHashMap<u64, u64> {
@@ -176,28 +193,76 @@ fn pass1_phrase_counts(
     }
 }
 
-fn collect_phrase_rows(
+fn collect_top_phrase_rows(
     phrase: &Utf8ColumnScan,
     mask: &[bool],
     row_count: usize,
-    phrase_hash: u64,
-) -> (Vec<usize>, String) {
-    let mut rows = Vec::new();
-    let mut phrase_text = String::new();
+    top_hashes: &AHashSet<u64>,
+) -> AHashMap<u64, (String, Vec<usize>)> {
+    let mut details = AHashMap::with_capacity(top_hashes.len());
     for i in 0..row_count {
         if !mask[i] {
             continue;
         }
         let s = phrase.str_at(i);
-        if hash_str(s) != phrase_hash {
+        let h = hash_str(s);
+        if !top_hashes.contains(&h) {
             continue;
         }
-        if phrase_text.is_empty() {
-            phrase_text = s.to_string();
-        }
-        rows.push(i);
+        details
+            .entry(h)
+            .or_insert_with(|| (s.to_string(), Vec::new()))
+            .1
+            .push(i);
     }
-    (rows, phrase_text)
+    details
+}
+
+fn pass2_top_details(
+    col_dir: &Path,
+    mask: &[bool],
+    row_count: usize,
+    top: &[(u64, u64)],
+    user_slice: &[i64],
+) -> Result<Vec<Vec<String>>> {
+    let top_hashes: AHashSet<u64> = top.iter().map(|(h, _)| *h).collect();
+
+    let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
+    let details = collect_top_phrase_rows(&phrase, mask, row_count, &top_hashes);
+    drop(phrase);
+
+    let url = Utf8ColumnScan::open(&col_dir.join("URL.col"))?;
+    let mut min_urls = AHashMap::with_capacity(details.len());
+    for (&h, (_, rows)) in &details {
+        min_urls.insert(h, min_utf8_at_rows(&url, rows));
+    }
+    drop(url);
+
+    let title = Utf8ColumnScan::open(&col_dir.join("Title.col"))?;
+    let mut min_titles = AHashMap::with_capacity(details.len());
+    for (&h, (_, rows)) in &details {
+        min_titles.insert(h, min_utf8_at_rows(&title, rows));
+    }
+    drop(title);
+
+    let mut out = Vec::with_capacity(top.len());
+    for (phrase_hash, count) in top {
+        let (phrase_text, rows) = details
+            .get(phrase_hash)
+            .map(|(p, r)| (p.as_str(), r.as_slice()))
+            .unwrap_or(("", &[]));
+        let min_url = min_urls.get(phrase_hash).map(String::as_str).unwrap_or("");
+        let min_title = min_titles.get(phrase_hash).map(String::as_str).unwrap_or("");
+        let distinct = distinct_users_at_rows(user_slice, rows);
+        out.push(vec![
+            phrase_text.to_string(),
+            min_url.to_string(),
+            min_title.to_string(),
+            count.to_string(),
+            distinct.to_string(),
+        ]);
+    }
+    Ok(out)
 }
 
 fn min_utf8_at_rows(col: &Utf8ColumnScan, rows: &[usize]) -> String {
@@ -227,10 +292,10 @@ fn q23_execute_streaming(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<Vec<String>>> {
-    let mask = build_q23_mask(col_dir, row_count)?;
+    let mut mask = build_q23_mask(col_dir, row_count)?;
 
     let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
-    let counts = pass1_phrase_counts(&phrase, &mask, row_count);
+    let counts = pass1_phrase_filter_and_counts(&phrase, &mut mask, row_count);
     drop(phrase);
 
     if counts.is_empty() {
@@ -244,32 +309,8 @@ fn q23_execute_streaming(
     );
 
     let users = Int64ColumnScan::open(&col_dir.join("UserID.col"))?;
-    let user_slice = users.as_slice();
+    let user_slice = users.as_slice().to_vec();
+    drop(users);
 
-    let mut out = Vec::with_capacity(top.len());
-    for (phrase_hash, count) in top {
-        let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
-        let (rows, phrase_text) = collect_phrase_rows(&phrase, &mask, row_count, phrase_hash);
-        drop(phrase);
-
-        let url = Utf8ColumnScan::open(&col_dir.join("URL.col"))?;
-        let min_url = min_utf8_at_rows(&url, &rows);
-        drop(url);
-
-        let title = Utf8ColumnScan::open(&col_dir.join("Title.col"))?;
-        let min_title = min_utf8_at_rows(&title, &rows);
-        drop(title);
-
-        let distinct = distinct_users_at_rows(user_slice, &rows);
-
-        out.push(vec![
-            phrase_text,
-            min_url,
-            min_title,
-            count.to_string(),
-            distinct.to_string(),
-        ]);
-    }
-
-    Ok(out)
+    pass2_top_details(col_dir, &mask, row_count, &top, &user_slice)
 }
