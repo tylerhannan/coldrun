@@ -25,18 +25,33 @@ Laptop numbers only — not ClickBench Combined (no cold protocol, no 100M rows,
 
 ## 100M cloud warm (c6a.4xlarge, Jun 2026)
 
-Partial warm-serve results before Q23 crash fix (`rebench-v2`, commit `0a65cf6`). Full re-run in progress after `18d7641`.
+Complete warm-serve run on AWS `c6a.4xlarge` (32 GiB), `/data/coldrun` ~100M rows. Snapshots: [`cloud-100m/serve-hot.md`](benchmarks/cloud-100m/serve-hot.md) · [`compare-hot.md`](benchmarks/cloud-100m/compare-hot.md).
 
-| Metric | Coldrun (hot, min tries 2–3) | ClickHouse (official hot) |
-|--------|--------------------------------|---------------------------|
-| Q1–22 sum | **~46s** | ~9.6s (Q1–20 ref) |
-| Q17 | 3.2s (was 12s) | 1.5s |
-| Q18 | 1.2s (was 21s) | 0.8s |
-| Q19 | 3.5s (was 27s) | 3.0s |
-| Q14 | 9.2s | 0.8s |
-| Q36 / Q41 | pending re-bench | 0.27s / 0.02s |
+| Metric | Coldrun (hot) | ClickHouse (official hot) |
+|--------|---------------|---------------------------|
+| **Q1–22 sum** | **46.0s** | ~9.6s |
+| **Q24–43 sum** | **401.1s** | ~22.8s |
+| **42 queries** (bench; Q23 skipped) | **447.1s** | **~32.4s** |
+| **All 43** (Q23 = smoke 234s) | **681.2s** | **~32.4s** |
 
-Runbook: [`CLOUD-RUN.md`](CLOUD-RUN.md). Monitor: `grep -c "^\[" /data/bench-rebench-tail.log` (43 = done).
+**Commit:** `eb414c9` · **Log:** `/data/bench-warm-full.log`
+
+| Query | CR | CH | Notes |
+|-------|-----|-----|-------|
+| Q14 | 9.2s | 0.75s | sort distinct still ~12× |
+| Q17–19 | 3.2s / 1.2s / 3.4s | 1.6s / 0.94s / 2.7s | sort agg (was 12s / 21s / 27s pre-fix) |
+| Q21–22 | 4.5s / 4.9s | 0.31s / 0.09s | string GROUP BY |
+| Q23 | 234s* | 0.61s | disk streaming (`group_fused_q23.rs`); smoke only |
+| Q24 | 231s | 0.10s | disk top-K + sequential `project_rows` (`scan_stream.rs`) |
+| Q25 | 0.008s | 0.038s | **CR wins** |
+| Q29 | 7.9s | 9.6s | **CR wins** |
+| Q33–35 | ~15–17s | ~3–4s | multi-column GROUP BY |
+| Q36 | 83s | 0.25s | REGEXP_REPLACE — sort path not enough |
+| Q41 | 7.5s | 0.013s | dashboard 5-col GROUP BY |
+
+Runbook: [`CLOUD-RUN.md`](CLOUD-RUN.md).
+
+\* Q23 verified by isolated smoke after streaming fix; formal bench resumed at Q24.
 
 ## Sort-based aggregation (`agg_sort.rs`, Jun 2026)
 
@@ -52,8 +67,9 @@ For 100M rows, hash maps with millions of groups or per-group `AHashSet` OOM or 
 | Q14 | `group_fused.rs` | Sort `(phrase_hash, UserID)` for COUNT DISTINCT |
 | Q17, Q19 | `group_fused.rs` | Sort user+phrase / user+minute+phrase pairs |
 | Q18 | `group_fused.rs` | Track first LIMIT distinct groups only (no ORDER BY) |
-| Q23 | `group_fused_q23.rs` | Sharded count map + top-10 detail pass (ClickHouse Aggregator pattern) |
-| Q36 | `group_columnar.rs` | Sort ClientIP u32 values |
+| Q23 | `group_fused_q23.rs` | Disk-stream mask + count + batched top-10 detail (7 column passes) |
+| Q24 | `scan_stream.rs` | URL/EventTime top-K heap; sequential `project_rows` for `SELECT *` |
+| Q36 | `group_columnar.rs` | Sort ClientIP u32 (still ~328× CH @ 100M — REGEXP in Q36) |
 | Q41 | `group_columnar.rs` | Collect zone-matching URLHash+EventDate keys, sort, top-K |
 
 ## Local benchmarking (demo)
@@ -102,8 +118,10 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | **Sort-based top-K @ 100M** | `agg_sort.rs` — Q9, Q14, Q17–Q19, Q36, Q41 (see above) |
 | **Streaming top-K scaffold** | `agg_topk.rs` wired for utf8 COUNT with LIMIT (non-demo) |
 | **`PodStorage` / Arc numerics** | Shared POD buffers after column read (`storage/pod.rs`) |
-| **Q24 partial sort** | `select_nth_unstable` for ORDER BY EventTime LIMIT scan |
-| **Q24 two-phase I/O** | Narrow load (URL + EventTime); lazy project after top-K sort |
+| **Q24 disk streaming** | `scan_stream.rs` — URL LIKE + EventTime top-K without match index vector; evict cache before `project_rows` |
+| **Q24 sequential project** | `project_rows` one column LZ4 decode at a time (was parallel → OOM on 32 GiB) |
+| **Scan ORDER BY fallbacks** | Mask + streaming top-K heap when fast paths miss (Q25–Q27 fallbacks) |
+| **Bench serve restart** | `bench-common.sh` restarts `serve` when check fails after OOM |
 | **Near-unique O(limit) GROUP BY** | Q11–15, Q31–34 on demo — skip full hash when one row per group |
 | **Q21 URL LIKE COUNT** | Direct utf8 LIKE count without filter mask allocation |
 | **Metadata-only I/O** | Empty referenced column set skips all `.col` file loads (Q1) |
@@ -117,7 +135,7 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | **Contiguous utf8 in memory** | `Utf8Column` blob + offsets (no per-row `String` on load); zero-copy scan |
 | **Serve table cache** | `Database::cached_hits` keeps loaded columns across warm `serve` queries; **evicts** columns not referenced by the current query (`Table::retain_columns`) |
 | **Streaming scan top-K** | Q25/Q26 heap over rows — no full filtered index vector |
-| **Parallel Q24 projection** | `project_rows` loads columns with `rayon` |
+| **Q24 row projection** | `project_rows` sequential one-column decode @ 100M (`eb414c9`; parallel rayon caused OOM) |
 | **Zone EventTime top-K** | Monotonic forward scan + v2 zone prune for ORDER BY EventTime LIMIT |
 | **Q6 ahash DISTINCT** | COUNT DISTINCT SearchPhrase without utf8 arena intern |
 | **Group hash reserve** | Pre-size hash tables from filtered row count |
@@ -171,14 +189,18 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | columnar pass | Fused columnar Q36/Q41 — correctness ✓; Q36/Q41 ~0.13s each on 1M (was ~0.22s) |
 | **100M sort agg** | `4965730` — `agg_sort.rs`; Q36/Q41 sort paths; Q17/Q19 sort top-K |
 | **100M Q14/Q18** | `0a65cf6` — Q14 hash-only distinct sort; Q18 first-LIMIT-groups |
-| **100M Q23 fix** | `18d7641` — two-phase sort; fixes OOM kill at Q23 on 32 GiB VM |
-| **100M Q23 v2** | sharded count-only pass 1 + top-10 detail pass 2 (ClickHouse Aggregator pattern; no O(rows) buffer on warm cache) |
+| **100M Q23 streaming** | `667c7c0` — batched pass2; ~234s smoke (was OOM / ~34 min) |
+| **100M Q24 streaming** | `e40ed01` — disk top-K; serve survives |
+| **100M Q24 project OOM** | `eb414c9` — sequential `project_rows`; Q24 **231s** hot, serve alive |
+| **100M warm bench done** | Q1–22 + Q24–43 @ `eb414c9` — [`cloud-100m/`](benchmarks/cloud-100m/) |
 
 ## Next (planned)
 
-1. **Finish 100M warm bench** — Q23–43 after `18d7641`, then ClickHouse compare on same VM
-2. **Official Combined** — `benchmark.sh` with `drop_caches` (~4–8 h)
-3. **Q14** — still ~10× CH on 100M; may need phrase-level sort + tighter filter pushdown
+1. **Q23/Q24 perf** — block-at-a-time URL scan; avoid full-column LZ4 decode (~231s → target ≪1min)
+2. **Q36** — fused REGEXP host extract without full Referer materialization (~83s vs CH 0.25s)
+3. **Q41** — zone + sort path gap (~7.5s vs CH 0.013s)
+4. **Official Combined** — `benchmark.sh` with `drop_caches` (~4–8 h)
+5. **ClickHouse compare on same VM** — `./scripts/bench-clickhouse-parquet.sh /data/hits.parquet --compare`
 
 ## Honest scope
 

@@ -13,7 +13,8 @@ Implementation notes for ClickBench queries with **non-obvious fused or sort-bas
 | Q17 | [`q-17.md`](q-17.md) | Sort `(UserID, phrase_hash)` top-K |
 | Q18 | [`q-18.md`](q-18.md) | First-LIMIT distinct groups |
 | Q19 | [`q-19.md`](q-19.md) | Sort `(UserID, minute, phrase_hash)` |
-| Q23 | [`q-23.md`](q-23.md) | Two-phase sort + min URL/title |
+| Q23 | [`q-23.md`](q-23.md) | Disk-stream two-phase agg + batched top-10 |
+| Q24 | [`q-24.md`](q-24.md) | Disk URL/EventTime top-K + sequential `SELECT *` |
 | Q36 | [`q-36.md`](q-36.md) | Sort ClientIP u32 |
 | Q41 | [`q-41.md`](q-41.md) | Zone scan + sort packed keys |
 
