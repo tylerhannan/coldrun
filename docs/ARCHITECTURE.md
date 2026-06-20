@@ -108,8 +108,8 @@ Per query: stop server → wait until down → `drop_caches` → start → run t
 
 1. **MVP (current):** ingest Parquet → column files; correct results for Q1–Q5 via `coldrun local`.
 2. **Coverage:** all 43 queries correct — demo smoke + **43/43 vs ClickHouse on 1M Parquet** (CI).
-3. **Perf (1M Parquet, warm serve):** hot sum **0.84s** (**0.62×** ClickHouse **1.34s**). Next: Q36, Q41. Warm CH server on cloud.
-4. **ClickBench PR:** automated `benchmark.sh`, `results/c6a.4xlarge.json`.
+3. **Perf (1M Parquet, warm serve):** hot sum **0.84s** (**0.62×** ClickHouse **1.34s**). **100M warm** logged @ `eb414c9` — **~681s** hot (see [`benchmarks/cloud-100m/`](benchmarks/cloud-100m/)). Next: [`NEXT.md`](NEXT.md).
+4. **ClickBench PR:** automated `benchmark.sh`, `results/c6a.4xlarge.json` — after P1 fixes in [`NEXT.md`](NEXT.md).
 
 ## Honest tradeoffs (toy framing)
 

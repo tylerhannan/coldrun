@@ -196,11 +196,7 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 
 ## Next (planned)
 
-1. **Q23/Q24 perf** — block-at-a-time URL scan; avoid full-column LZ4 decode (~231s → target ≪1min)
-2. **Q36** — fused REGEXP host extract without full Referer materialization (~83s vs CH 0.25s)
-3. **Q41** — zone + sort path gap (~7.5s vs CH 0.013s)
-4. **Official Combined** — `benchmark.sh` with `drop_caches` (~4–8 h)
-5. **ClickHouse compare on same VM** — `./scripts/bench-clickhouse-parquet.sh /data/hits.parquet --compare`
+Prioritized backlog: **[`NEXT.md`](NEXT.md)** (P0 hygiene → P1 Q23/Q24 → P2 Q36/Q41 → measurement).
 
 ## Honest scope
 

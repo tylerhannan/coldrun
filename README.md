@@ -19,8 +19,8 @@ Coldrun is the database under test. It does not run ClickBench for other systems
 | 1. Architecture doc | Done | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | 2. MVP: load `hits`, queries 1–5 | Done | demo + Parquet (dynamic schema) |
 | 3. All 43 queries correct | Done | Demo smoke + **43/43 vs ClickHouse** on 1M Parquet ([`validation-1m.md`](docs/benchmarks/parquet/validation-1m.md)) |
-| 4. Optimize Combined score | In progress | 1M hot sum **0.84s** (0.62× CH **1.34s**); **100M warm** on cloud `c6a.4xlarge` — sort-based agg for Q9/Q14/Q17–Q19/Q36/Q41, Q23 two-phase fix (`18d7641`); partial warm **~46s** Q1–22 hot |
-| 5. ClickBench PR | Not started | [`clickbench/coldrun/`](clickbench/coldrun/) harness — after warm bench + official `benchmark.sh` |
+| 4. Optimize Combined score | In progress | 1M hot **0.84s** (0.62× CH); 100M warm **~681s** vs CH **~32s** @ `eb414c9` — see [`docs/benchmarks/cloud-100m/`](docs/benchmarks/cloud-100m/) · next: [`docs/NEXT.md`](docs/NEXT.md) |
+| 5. ClickBench PR | Not started | [`clickbench/coldrun/`](clickbench/coldrun/) — after [`docs/NEXT.md`](docs/NEXT.md) P1 + official `benchmark.sh` |
 
 ## Prerequisites
 

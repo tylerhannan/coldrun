@@ -12,6 +12,7 @@ Committed timing snapshots for local regression. **Demo** = synthetic `hits`; **
 | [`parquet/`](parquet/) | Real `hits` Parquet: ClickHouse validate + measure |
 | [`parquet-hits-1m/`](parquet-hits-1m/) | **1M row** warm-serve hot snapshot (**0.84s** sum) |
 | [`cloud-100m/`](cloud-100m/) | **100M row** warm-serve on `c6a.4xlarge` (`eb414c9`) |
+| [`../NEXT.md`](../NEXT.md) | Prioritized perf backlog (P0–P6) |
 | [`regression/`](regression/) | Early milestone / batch status notes (historical) |
 
 ## Run locally

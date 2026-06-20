@@ -2,7 +2,7 @@
 
 Implementation notes for ClickBench queries with **non-obvious fused or sort-based paths**. Timings live in [`docs/benchmarks/`](../benchmarks/) and [`PERF.md`](../PERF.md).
 
-**Current 100M strategy (Jun 2026):** sort + run-length aggregation in `crates/coldrun-core/src/exec/agg_sort.rs` — see [`PERF.md`](../PERF.md#sort-based-aggregation-agg_sortrs-jun-2026).
+**Current 100M strategy (Jun 2026):** sort + run-length aggregation in `crates/coldrun-core/src/exec/agg_sort.rs` — see [`PERF.md`](../PERF.md#sort-based-aggregation-agg_sortrs-jun-2026). **What to do next:** [`NEXT.md`](../NEXT.md).
 
 ## Queries with maintained notes
 

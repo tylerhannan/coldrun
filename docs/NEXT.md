@@ -1,0 +1,113 @@
+# Next steps (prioritized)
+
+**Baseline:** warm-serve 100M on `c6a.4xlarge` @ [`eb414c9`](https://github.com/tylerhannan/coldrun/commit/eb414c9) — see [`benchmarks/cloud-100m/`](benchmarks/cloud-100m/) and [`PERF.md`](PERF.md).
+
+**Goal:** shrink the **~681s** hot sum (all 43; Q23 smoke) toward ClickHouse **~32s**, without regressing 1M correctness (**43/43** vs CH) or warm-serve stability on 32 GiB.
+
+---
+
+## P0 — Hygiene (do first)
+
+| # | Item | Why | Action |
+|---|------|-----|--------|
+| 0.1 | **Merge warning cleanup** | Clean build signal before perf work | [PR #1](https://github.com/tylerhannan/coldrun/pull/1) (`chore/warning-cleanup`) |
+| 0.2 | **Formal Q23 bench** | Only smoke (~234s); skews totals | `./scripts/bench-serve.sh 100000000 --skip-load --from 23` on cloud VM |
+| 0.3 | **Re-bench after each P1 fix** | Hot = min(try 2, 3); update [`cloud-100m/serve-hot.md`](benchmarks/cloud-100m/serve-hot.md) | `./scripts/bench-serve.sh 100000000 --skip-load --write-snapshot` |
+
+---
+
+## P1 — Outliers (~465s of ~681s; fix these first)
+
+Full-column utf8 decode on 100M rows dominates. Same fix class: **scan compressed bytes block-at-a-time** (LIKE / empty checks) and **project only needed cells** (sidecar `.col.idx` already exists).
+
+| # | Query | CR hot | CH hot | Work | Code |
+|---|-------|--------|--------|------|------|
+| 1.1 | **Q24** | 231s | 0.10s | Stream URL LIKE without full LZ4 expand; `read_cells_at` for 10 rows × ~80 cols without per-column full decode | [`scan_stream.rs`](../crates/coldrun-core/src/exec/scan_stream.rs), [`table.rs`](../crates/coldrun-core/src/storage/table.rs) |
+| 1.2 | **Q23** | 234s* | 0.61s | Block scan Title / URL / SearchPhrase in mask + count + batched pass2 (7 passes today, each still full-column) | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
+
+\* Q23 smoke only — see P0.2.
+
+**Success target:** each ≪ **60s** on warm serve (stretch: ≪ **10s**).
+
+Detail: [`perf/q-23.md`](perf/q-23.md), [`perf/q-24.md`](perf/q-24.md).
+
+---
+
+## P2 — High ratio, large Δ (tail Q25–43)
+
+Excluding Q23/Q24, Q25–43 sum is **~170s** vs CH **~23s**.
+
+| # | Query | CR hot | CH hot | Work | Code |
+|---|-------|--------|--------|------|------|
+| 2.1 | **Q36** | 83s | 0.25s | Fused `REGEXP_REPLACE(Referer, …)` host extract on stream; avoid materializing full Referer | [`group_columnar.rs`](../crates/coldrun-core/src/exec/group_columnar.rs), [`q-36.md`](perf/q-36.md) |
+| 2.2 | **Q41** | 7.5s | 0.013s | Tighten zone + sort path; single-pass 5-col dashboard GROUP BY without repeated string decode | [`group_columnar.rs`](../crates/coldrun-core/src/exec/group_columnar.rs), [`q-41.md`](perf/q-41.md) |
+| 2.3 | **Q33–35** | ~15–17s | ~3s | Multi-column utf8/int GROUP BY — extend columnar shard pattern from Q31–32 | [`group_fused.rs`](../crates/coldrun-core/src/exec/group_fused.rs), [`column_slice.rs`](../crates/coldrun-core/src/storage/column_slice.rs) |
+
+---
+
+## P3 — String GROUP BY (Q1–22 band)
+
+| # | Query | CR hot | CH hot | Work |
+|---|-------|--------|--------|------|
+| 3.1 | **Q22** | 4.9s | 0.09s | SearchPhrase GROUP BY — fused path exists; still full phrase decode |
+| 3.2 | **Q21** | 4.5s | 0.31s | URL GROUP BY after LIKE filter |
+| 3.3 | **Q14** | 9.2s | 0.75s | Sort-based distinct done; still ~12× — reduce phrase/UserID materialization |
+
+---
+
+## P4 — Dashboard LIKE cluster (Q37–43)
+
+Many queries at **80–190×** ratio but **~3–4s** each absolute. Shared pattern: dashboard zone mask + **Referer/URL string predicates** on cold utf8 columns.
+
+| # | Item | Work |
+|---|------|------|
+| 4.1 | **Q37–40, Q42–43** | One shared streaming Referer/URL matcher over mmap’d column bytes (same infrastructure as P1) |
+| 4.2 | **Q40** | CASE on referer host — keep fused kernel, feed it block scans |
+
+---
+
+## P5 — Remaining Q1–22 gaps (ratio > 5×, Δ > 0.5s)
+
+Not blockers for tail sum but worth batching after P1–P2:
+
+| Query | CR | CH | Notes |
+|-------|-----|-----|-------|
+| Q5 | 2.7s | 0.27s | Global COUNT DISTINCT SearchPhrase |
+| Q10 | 4.4s | 0.49s | AdvEngineID GROUP BY |
+| Q13 | 3.2s | 0.53s | SearchPhrase COUNT |
+| Q16 | 3.1s | 0.38s | UserID GROUP BY |
+| Q7–8 | ~0.25s | ~0.01s | Simple int GROUP BY — low absolute Δ |
+
+---
+
+## P6 — Measurement & publication
+
+| # | Item | Notes |
+|---|------|-------|
+| 6.1 | **ClickHouse on same VM** | `./scripts/bench-clickhouse-parquet.sh /data/hits.parquet --write-snapshot --compare` — apples-to-apples vs CR warm serve |
+| 6.2 | **Official Combined** | `clickbench/coldrun/benchmark.sh` + `drop_caches` per query (~4–8 h on c6a.4xlarge) |
+| 6.3 | **ClickBench PR** | Submit `results/c6a.4xlarge.json` after Combined + stable warm path — [`clickbench/coldrun/`](../clickbench/coldrun/) |
+| 6.4 | **Update README step 4** | Keep [`README.md`](../README.md) build table in sync after next cloud snapshot |
+
+Runbook: [`CLOUD-RUN.md`](CLOUD-RUN.md).
+
+---
+
+## Wins to preserve
+
+Do not regress:
+
+- **Q25** — CR **0.008s** vs CH 0.038s (column-order scan)
+- **Q29** — CR **7.9s** vs CH 9.6s (referer host fused GROUP BY)
+- **1M hot sum** — **0.84s** (0.62× CH) — run `./scripts/measure-parquet.sh data/hits-1m.parquet` before merging large exec changes
+
+---
+
+## Suggested order of execution
+
+1. P0.1 → P1.1 (Q24) → re-bench → P1.2 (Q23) → re-bench  
+2. P2.1 (Q36) → P2.2 (Q41) → P2.3 (Q33–35)  
+3. P4.1 (shared string scan) — unlocks P3 and most of P4 in one pass  
+4. P6.1–6.3 when warm sum is within ~2–5× of CH on tail queries  
+
+When an item ships, update [`PERF.md`](PERF.md) changelog and the relevant [`perf/q-*.md`](perf/) note.
