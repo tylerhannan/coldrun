@@ -146,7 +146,7 @@ fn pass1_phrase_counts(
 
     let cap = (row_count / (COUNT_SHARDS * 8)).max(4);
     if row_count >= PARALLEL_THRESHOLD {
-        (0..row_count)
+        let parts: Vec<AHashMap<u64, u64>> = (0..row_count)
             .into_par_iter()
             .fold(
                 || AHashMap::with_capacity(cap),
@@ -158,7 +158,12 @@ fn pass1_phrase_counts(
                     map
                 },
             )
-            .reduce(|| AHashMap::new(), merge_phrase_counts)
+            .collect();
+        let mut merged = AHashMap::with_capacity(cap * parts.len().min(32));
+        for part in parts {
+            merged = merge_phrase_counts(merged, part);
+        }
+        merged
     } else {
         let mut map = AHashMap::with_capacity(cap);
         for i in 0..row_count {

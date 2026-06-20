@@ -10,7 +10,7 @@ HOST="${COLDRUN_HOST:-127.0.0.1:9000}"
 
 export COLDRUN_BENCH=1
 
-if ./check >/dev/null 2>&1; then
+if "$DIR/check" >/dev/null 2>&1; then
   "$COLDRUN" --data-dir "$DATA_DIR" client --host "$HOST"
 else
   "$COLDRUN" --data-dir "$DATA_DIR" local
