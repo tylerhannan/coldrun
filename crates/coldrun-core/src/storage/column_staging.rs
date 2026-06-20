@@ -168,7 +168,7 @@ fn read_staged_offsets(path: &Path, name: &str) -> Result<Vec<u64>> {
             "utf8 column '{name}' offset staging file size {len} is not a multiple of 8"
         )));
     }
-    let count = (len / 8) as usize;
+    let _count = (len / 8) as usize;
     let mut bytes = vec![0u8; len as usize];
     f.read_exact(&mut bytes)?;
     Ok(bytes

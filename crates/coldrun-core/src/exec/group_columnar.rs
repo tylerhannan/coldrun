@@ -2,13 +2,12 @@
 
 use ahash::AHashMap;
 
-use super::agg_heap::{top_counts, top_counts_u128_key};
+use super::agg_heap::top_counts_u128_key;
 use super::column_slice::{self, IntCols};
 use super::mask_util::{for_each_selected, mask_is_sparse, selected_indices};
 use super::simd_scan::for_each_q41_zone_match;
 
 const CHUNK: usize = 8192;
-const Q36_PARALLEL_THRESHOLD: usize = 250_000;
 const Q41_PARALLEL_THRESHOLD: usize = 250_000;
 const COUNT_SHARDS: usize = 256;
 
@@ -31,29 +30,12 @@ pub fn unpack_clientip_quad(key: u128) -> [i32; 4] {
     ]
 }
 
-type U32ShardMaps = [AHashMap<u32, u64>; COUNT_SHARDS];
 type ShardMaps = [AHashMap<u128, u64>; COUNT_SHARDS];
-
-#[inline]
-fn empty_u32_shards(cap_hint: usize) -> U32ShardMaps {
-    let cap = (cap_hint / (COUNT_SHARDS * 4)).max(8);
-    std::array::from_fn(|_| AHashMap::with_capacity(cap))
-}
 
 #[inline]
 fn empty_shards(cap_hint: usize) -> ShardMaps {
     let cap = (cap_hint / (COUNT_SHARDS * 8)).max(4);
     std::array::from_fn(|_| AHashMap::with_capacity(cap))
-}
-
-#[inline]
-fn merge_u32_shard_maps(mut a: U32ShardMaps, mut b: U32ShardMaps) -> U32ShardMaps {
-    for i in 0..COUNT_SHARDS {
-        for (k, v) in b[i].drain() {
-            *a[i].entry(k).or_insert(0) += v;
-        }
-    }
-    a
 }
 
 #[inline]
@@ -67,54 +49,9 @@ fn merge_shard_maps(mut a: ShardMaps, mut b: ShardMaps) -> ShardMaps {
 }
 
 #[inline]
-fn u32_shard_add(shards: &mut U32ShardMaps, ip: i32) {
-    let key = ip as u32;
-    let shard = key as usize % COUNT_SHARDS;
-    *shards[shard].entry(key).or_insert(0) += 1;
-}
-
-#[inline]
 fn shard_add(shards: &mut ShardMaps, key: u128) {
     let shard = (key as usize) % COUNT_SHARDS;
     *shards[shard].entry(key).or_insert(0) += 1;
-}
-
-fn merge_global_topk_u32(
-    candidates: impl Iterator<Item = (u32, u64)>,
-    limit: usize,
-    offset: usize,
-) -> Vec<(u32, u64)> {
-    top_counts(
-        candidates.map(|(k, c)| (c, (k, c))),
-        limit,
-        offset,
-    )
-    .into_iter()
-    .map(|(k, c)| (k, c))
-    .collect()
-}
-
-fn topk_from_u32_shards(shards: U32ShardMaps, limit: usize, offset: usize) -> Vec<(u32, u64)> {
-    let need = limit.saturating_add(offset);
-    if need == 0 {
-        return Vec::new();
-    }
-    let mut candidates = Vec::with_capacity(need.saturating_mul(COUNT_SHARDS));
-    for m in shards {
-        if m.is_empty() {
-            continue;
-        }
-        if m.len() <= need {
-            candidates.extend(m);
-        } else {
-            candidates.extend(top_counts(
-                m.into_iter().map(|(k, c)| (c, (k, c))),
-                need,
-                0,
-            ));
-        }
-    }
-    merge_global_topk_u32(candidates.into_iter(), limit, offset)
 }
 
 fn merge_global_topk(
@@ -229,11 +166,6 @@ pub fn dashboard_q41_topk(
             offset,
         )
     }
-}
-
-#[inline]
-fn zone_range_rows(zone_ranges: &[(usize, usize)]) -> usize {
-    zone_ranges.iter().map(|&(s, e)| e.saturating_sub(s)).sum()
 }
 
 fn zone_subranges(zone_ranges: &[(usize, usize)], chunk: usize) -> Vec<(usize, usize)> {

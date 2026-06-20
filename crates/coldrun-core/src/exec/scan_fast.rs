@@ -691,10 +691,6 @@ fn partial_sort_indices_two(
     });
 }
 
-fn partial_sort_indices_by_timestamp(col: &ColumnData, indices: &mut [usize], need: usize) {
-    partial_sort_indices_by_column(col, indices, need, false);
-}
-
 fn sort_indices_by_column(col: &ColumnData, indices: &mut [usize], desc: bool) {
     match col {
         ColumnData::Utf8(v) => {

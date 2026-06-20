@@ -1,55 +1,6 @@
 //! SIMD-friendly column scans for fused GROUP BY kernels.
 
-const UNROLL: usize = 32;
 const BLOCK: usize = 8192;
-
-/// Wide unrolled i32 scan — LLVM autovectorizes the inner loop.
-#[inline]
-pub fn for_each_i32_wide(slice: &[i32], mut f: impl FnMut(i32)) {
-    let mut i = 0;
-    let len = slice.len();
-    while i + UNROLL <= len {
-        f(slice[i]);
-        f(slice[i + 1]);
-        f(slice[i + 2]);
-        f(slice[i + 3]);
-        f(slice[i + 4]);
-        f(slice[i + 5]);
-        f(slice[i + 6]);
-        f(slice[i + 7]);
-        f(slice[i + 8]);
-        f(slice[i + 9]);
-        f(slice[i + 10]);
-        f(slice[i + 11]);
-        f(slice[i + 12]);
-        f(slice[i + 13]);
-        f(slice[i + 14]);
-        f(slice[i + 15]);
-        f(slice[i + 16]);
-        f(slice[i + 17]);
-        f(slice[i + 18]);
-        f(slice[i + 19]);
-        f(slice[i + 20]);
-        f(slice[i + 21]);
-        f(slice[i + 22]);
-        f(slice[i + 23]);
-        f(slice[i + 24]);
-        f(slice[i + 25]);
-        f(slice[i + 26]);
-        f(slice[i + 27]);
-        f(slice[i + 28]);
-        f(slice[i + 29]);
-        f(slice[i + 30]);
-        f(slice[i + 31]);
-        i += UNROLL;
-    }
-    while i < len {
-        f(slice[i]);
-        i += 1;
-    }
-}
-
-#[inline(always)]
 fn q41_row_ok(
     i: usize,
     referer_hash: i64,
