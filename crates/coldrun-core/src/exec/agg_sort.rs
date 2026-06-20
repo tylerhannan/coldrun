@@ -62,13 +62,8 @@ pub fn sorted_topk_i32(ips: &[i32], limit: usize, offset: usize) -> Vec<(u32, u6
     topk_from_sorted_keys(&v, limit, offset)
 }
 
-pub fn sorted_topk_u32(keys: &[u32], limit: usize, offset: usize) -> Vec<(u32, u64)> {
-    let mut v = copy_and_sort(keys);
-    topk_from_sorted_keys(&v, limit, offset)
-}
-
 pub fn sorted_topk_u128(keys: &[u128], limit: usize, offset: usize) -> Vec<(u128, u64)> {
-    let mut v = copy_and_sort(keys);
+    let v = copy_and_sort(keys);
     topk_from_sorted_keys(&v, limit, offset)
 }
 

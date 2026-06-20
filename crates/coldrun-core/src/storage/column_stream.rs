@@ -32,7 +32,6 @@ fn build_sequential_offsets(body: &[u8], row_count: usize) -> Result<Vec<u64>> {
 pub struct Utf8ColumnScan {
     body: Vec<u8>,
     offsets: Vec<u64>,
-    row_count: usize,
 }
 
 impl Utf8ColumnScan {
@@ -51,12 +50,7 @@ impl Utf8ColumnScan {
         Ok(Self {
             body,
             offsets,
-            row_count,
         })
-    }
-
-    pub fn len(&self) -> usize {
-        self.row_count
     }
 
     #[inline]
@@ -86,10 +80,6 @@ impl Int64ColumnScan {
             values.extend_from_slice(std::slice::from_raw_parts(ptr, count));
         }
         Ok(Self { values })
-    }
-
-    pub fn len(&self) -> usize {
-        self.values.len()
     }
 
     #[inline]

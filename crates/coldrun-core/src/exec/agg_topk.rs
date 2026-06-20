@@ -30,24 +30,12 @@ impl<K: Hash + Eq + Clone + Ord> StreamingTopK<K> {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.counts.len()
-    }
-
     pub fn contains_key(&self, key: &K) -> bool {
         self.counts.contains_key(key)
     }
 
     pub fn inc(&mut self, key: K) {
         *self.counts.entry(key).or_insert(0) += 1;
-        self.maybe_prune();
-    }
-
-    /// Merge exact partial counts (safe after parallel fold before global top-K).
-    pub fn absorb(&mut self, other: Self) {
-        for (k, v) in other.counts {
-            *self.counts.entry(k).or_insert(0) += v;
-        }
         self.maybe_prune();
     }
 
@@ -79,22 +67,6 @@ impl<K: Hash + Eq + Clone + Ord> StreamingTopK<K> {
         for Reverse((c, k)) in heap {
             self.counts.insert(k, c);
         }
-    }
-
-    /// Top `n` groups by count desc (no offset applied — for sharded merge).
-    pub fn top_n(self, n: usize) -> Vec<(K, u64)> {
-        if n == 0 {
-            return Vec::new();
-        }
-        let mut pairs: Vec<(u64, K)> = self.counts.into_iter().map(|(k, c)| (c, k)).collect();
-        if pairs.len() <= n {
-            pairs.sort_by(|a, b| b.0.cmp(&a.0));
-        } else {
-            pairs.select_nth_unstable_by(n - 1, |a, b| b.0.cmp(&a.0));
-            pairs.truncate(n);
-            pairs.sort_by(|a, b| b.0.cmp(&a.0));
-        }
-        pairs.into_iter().map(|(c, k)| (k, c)).collect()
     }
 
     /// Top `(key, count)` pairs by count descending (for a second aggregation pass).
@@ -166,64 +138,5 @@ impl<K: Hash + Eq + Clone + Ord> StreamingTopK<K> {
             .take(self.limit)
             .map(|(_, _, t)| t)
             .collect()
-    }
-}
-
-pub trait TopKCount {
-    fn topk_count(&self) -> u64;
-}
-
-/// Top-K over aggregate state ranked by [`TopKCount::topk_count`].
-pub struct StreamingAggTopK<K: Hash + Eq + Clone, A> {
-    map: AHashMap<K, A>,
-    limit: usize,
-    offset: usize,
-    prune_factor: usize,
-}
-
-impl<K: Hash + Eq + Clone + Ord, A: TopKCount + Default> StreamingAggTopK<K, A> {
-    pub fn new(limit: usize, offset: usize) -> Self {
-        Self {
-            map: AHashMap::new(),
-            limit,
-            offset,
-            prune_factor: 64,
-        }
-    }
-
-    pub fn update(&mut self, key: K, f: impl FnOnce(&mut A)) {
-        let e = self.map.entry(key).or_default();
-        f(e);
-        let need = self.limit.saturating_add(self.offset);
-        if need > 0 && self.map.len() > need.saturating_mul(self.prune_factor) {
-            self.prune();
-        }
-    }
-
-    fn prune(&mut self) {
-        let need = self.limit.saturating_add(self.offset);
-        if need == 0 {
-            return;
-        }
-        let mut entries: Vec<(u64, K, A)> = self
-            .map
-            .drain()
-            .map(|(k, a)| (a.topk_count(), k, a))
-            .collect();
-        if entries.len() <= need {
-            for (_, k, a) in entries {
-                self.map.insert(k, a);
-            }
-            return;
-        }
-        entries.select_nth_unstable_by(need - 1, |a, b| b.0.cmp(&a.0));
-        entries.truncate(need);
-        for (_, k, a) in entries {
-            self.map.insert(k, a);
-        }
-    }
-
-    pub fn into_map(self) -> AHashMap<K, A> {
-        self.map
     }
 }

@@ -10,7 +10,6 @@ use super::utf8_col::{read_utf8_offsets, utf8_str_at, write_utf8_idx_sidecar, Ut
 use crate::Result;
 
 pub(crate) const MAGIC: &[u8; 4] = b"CRUN";
-const IDX_MAGIC: &[u8; 4] = b"CRUI";
 pub(crate) const FORMAT_V1: u8 = 1;
 pub(crate) const ENC_RAW: u8 = 0;
 pub(crate) const ENC_LZ4: u8 = 1;
@@ -332,10 +331,6 @@ fn read_pod_slice<T: Copy>(body: &[u8], count: usize) -> Result<PodStorage<T>> {
         vec.extend_from_slice(std::slice::from_raw_parts(ptr, count));
     }
     Ok(PodStorage::from_arc(Arc::from(vec.into_boxed_slice())))
-}
-
-fn read_utf8_at(body: &[u8], row: usize, count: usize) -> Result<String> {
-    utf8_str_at(body, None, row, count)
 }
 
 fn parse_col_type(tag: u8) -> Result<ColumnType> {
