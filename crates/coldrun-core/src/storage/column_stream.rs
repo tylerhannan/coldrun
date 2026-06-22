@@ -86,8 +86,4 @@ impl Int64ColumnScan {
     pub fn at(&self, row: usize) -> i64 {
         self.values[row]
     }
-
-    pub fn as_slice(&self) -> &[i64] {
-        &self.values
-    }
 }

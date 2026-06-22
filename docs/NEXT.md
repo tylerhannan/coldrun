@@ -25,7 +25,7 @@ Full-column utf8 decode on 100M rows dominates. Same fix class: **scan compresse
 | # | Query | CR hot | CH hot | Work | Code |
 |---|-------|--------|--------|------|------|
 | 1.1 | **Q24** | 231s | 0.10s | **Follow-up:** block-at-a-time URL scan + cell-at projection without full LZ4 expand (see below) | [`scan_stream.rs`](../crates/coldrun-core/src/exec/scan_stream.rs), [`table.rs`](../crates/coldrun-core/src/storage/table.rs) |
-| 1.2 | **Q23** | 227s | 0.61s | Block scan Title / URL / SearchPhrase in mask + count + batched pass2 (7 passes today, each still full-column) | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
+| 1.2 | **Q23** | 227s | 0.61s | **In progress:** combined Title+URL mask pass, sparse row indices, no UserID `to_vec` copy — bench pending | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
 
 **Success target:** each ≪ **60s** on warm serve (stretch: ≪ **10s**).
 

@@ -1,8 +1,8 @@
 //! Q23: SearchPhrase + MIN(URL) + MIN(Title) + COUNT + COUNT(DISTINCT UserID).
 //!
 //! Streams one column file at a time from disk — never loads URL+Title+SearchPhrase into the
-//! warm-serve cache (~20 GiB decoded on 100M). Seven column decompresses total: Title+URL mask,
-//! SearchPhrase filter+count, UserID, then one batched pass2 (SearchPhrase+URL+Title) for top-K.
+//! warm-serve cache (~20 GiB decoded on 100M). Column decompresses: Title+URL mask (one row pass),
+//! SearchPhrase filter+count, UserID, then batched pass2 (SearchPhrase+URL+Title) for top-K.
 
 use std::path::Path;
 
@@ -18,7 +18,8 @@ use super::group_fused::hash_str;
 use super::QueryResult;
 
 const PARALLEL_THRESHOLD: usize = 250_000;
-const COUNT_SHARDS: usize = 256;
+/// Build explicit row-index list when sparser than this (saves scanning non-matching rows).
+const SPARSE_INDEX_RATIO: usize = 8;
 
 const Q23_COLS: &[&str] = &["URL", "Title", "SearchPhrase", "UserID"];
 
@@ -73,54 +74,55 @@ fn is_col(e: &sqlparser::ast::Expr, name: &str) -> bool {
     crate::sql::expr_column_name(e).as_deref() == Some(name)
 }
 
+/// Title `%Google%` and URL not `%.google.%` in a single row pass (two LZ4 decompresses).
 fn build_q23_mask(col_dir: &Path, row_count: usize) -> Result<Vec<bool>> {
     use rayon::prelude::*;
 
     let title = Utf8ColumnScan::open(&col_dir.join("Title.col"))?;
-    let mut mask = vec![false; row_count];
-    if row_count >= PARALLEL_THRESHOLD {
-        mask.par_iter_mut()
-            .enumerate()
-            .for_each(|(i, slot)| {
-                *slot = memchr::memmem::find(title.str_at(i).as_bytes(), b"Google").is_some();
-            });
-    } else {
-        for i in 0..row_count {
-            mask[i] = memchr::memmem::find(title.str_at(i).as_bytes(), b"Google").is_some();
-        }
-    }
-    drop(title);
-
     let url = Utf8ColumnScan::open(&col_dir.join("URL.col"))?;
+    let mut mask = vec![false; row_count];
+
     if row_count >= PARALLEL_THRESHOLD {
         mask.par_iter_mut()
             .enumerate()
             .for_each(|(i, slot)| {
-                if *slot && memchr::memmem::find(url.str_at(i).as_bytes(), b".google.").is_some() {
-                    *slot = false;
+                if memchr::memmem::find(title.str_at(i).as_bytes(), b"Google").is_some()
+                    && memchr::memmem::find(url.str_at(i).as_bytes(), b".google.").is_none()
+                {
+                    *slot = true;
                 }
             });
     } else {
         for i in 0..row_count {
-            if mask[i] && memchr::memmem::find(url.str_at(i).as_bytes(), b".google.").is_some() {
-                mask[i] = false;
+            if memchr::memmem::find(title.str_at(i).as_bytes(), b"Google").is_some()
+                && memchr::memmem::find(url.str_at(i).as_bytes(), b".google.").is_none()
+            {
+                mask[i] = true;
             }
         }
     }
-    drop(url);
 
+    drop(title);
+    drop(url);
     Ok(mask)
 }
 
-fn pass1_phrase_filter_and_counts(
-    phrase: &Utf8ColumnScan,
-    mask: &mut [bool],
-    row_count: usize,
-) -> AHashMap<u64, u64> {
+fn matching_row_indices(mask: &[bool]) -> Vec<usize> {
+    let true_count = mask.iter().filter(|&&m| m).count();
+    if true_count * SPARSE_INDEX_RATIO > mask.len() {
+        return Vec::new();
+    }
+    mask.iter()
+        .enumerate()
+        .filter(|(_, &m)| m)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn clear_empty_phrases(phrase: &Utf8ColumnScan, mask: &mut [bool], sparse: &[usize]) {
     use rayon::prelude::*;
 
-    let cap = (row_count / (COUNT_SHARDS * 8)).max(4);
-    if row_count >= PARALLEL_THRESHOLD {
+    if sparse.is_empty() {
         mask.par_iter_mut()
             .enumerate()
             .for_each(|(i, slot)| {
@@ -128,9 +130,30 @@ fn pass1_phrase_filter_and_counts(
                     *slot = false;
                 }
             });
-        pass1_phrase_counts(phrase, mask, row_count)
     } else {
-        let mut map = AHashMap::with_capacity(cap);
+        for &i in sparse {
+            if mask[i] && phrase.str_at(i).is_empty() {
+                mask[i] = false;
+            }
+        }
+    }
+}
+
+fn pass1_phrase_filter_and_counts(
+    phrase: &Utf8ColumnScan,
+    mask: &mut [bool],
+    sparse: &[usize],
+    row_count: usize,
+) -> AHashMap<u64, u64> {
+    let cap = (row_count / 256).max(4);
+
+    if row_count >= PARALLEL_THRESHOLD {
+        clear_empty_phrases(phrase, mask, sparse);
+        return phrase_counts_parallel(phrase, mask, sparse, cap);
+    }
+
+    let mut map = AHashMap::with_capacity(cap);
+    if sparse.is_empty() {
         for i in 0..row_count {
             if !mask[i] {
                 continue;
@@ -143,8 +166,67 @@ fn pass1_phrase_filter_and_counts(
             let h = hash_str(s);
             *map.entry(h).or_insert(0) += 1;
         }
-        map
+    } else {
+        for &i in sparse {
+            if !mask[i] {
+                continue;
+            }
+            let s = phrase.str_at(i);
+            if s.is_empty() {
+                mask[i] = false;
+                continue;
+            }
+            let h = hash_str(s);
+            *map.entry(h).or_insert(0) += 1;
+        }
     }
+    map
+}
+
+fn phrase_counts_parallel(
+    phrase: &Utf8ColumnScan,
+    mask: &[bool],
+    sparse: &[usize],
+    cap: usize,
+) -> AHashMap<u64, u64> {
+    use rayon::prelude::*;
+
+    if !sparse.is_empty() {
+        return sparse
+            .par_iter()
+            .fold(
+                || AHashMap::with_capacity(cap),
+                |mut map, &i| {
+                    if mask[i] {
+                        let h = hash_str(phrase.str_at(i));
+                        *map.entry(h).or_insert(0) += 1;
+                    }
+                    map
+                },
+            )
+            .reduce(|| AHashMap::new(), merge_phrase_counts);
+    }
+
+    let n_threads = rayon::current_num_threads().max(1);
+    let chunk = mask.len().div_ceil(n_threads);
+    (0..n_threads)
+        .into_par_iter()
+        .map(|tid| {
+            let start = tid * chunk;
+            if start >= mask.len() {
+                return AHashMap::new();
+            }
+            let end = (start + chunk).min(mask.len());
+            let mut map = AHashMap::with_capacity(cap);
+            for i in start..end {
+                if mask[i] {
+                    let h = hash_str(phrase.str_at(i));
+                    *map.entry(h).or_insert(0) += 1;
+                }
+            }
+            map
+        })
+        .reduce(|| AHashMap::new(), merge_phrase_counts)
 }
 
 fn merge_phrase_counts(mut a: AHashMap<u64, u64>, b: AHashMap<u64, u64>) -> AHashMap<u64, u64> {
@@ -154,66 +236,36 @@ fn merge_phrase_counts(mut a: AHashMap<u64, u64>, b: AHashMap<u64, u64>) -> AHas
     a
 }
 
-fn pass1_phrase_counts(
-    phrase: &Utf8ColumnScan,
-    mask: &[bool],
-    row_count: usize,
-) -> AHashMap<u64, u64> {
-    use rayon::prelude::*;
-
-    let cap = (row_count / (COUNT_SHARDS * 8)).max(4);
-    if row_count >= PARALLEL_THRESHOLD {
-        let parts: Vec<AHashMap<u64, u64>> = (0..row_count)
-            .into_par_iter()
-            .fold(
-                || AHashMap::with_capacity(cap),
-                |mut map, i| {
-                    if mask[i] {
-                        let h = hash_str(phrase.str_at(i));
-                        *map.entry(h).or_insert(0) += 1;
-                    }
-                    map
-                },
-            )
-            .collect();
-        let mut merged = AHashMap::with_capacity(cap * parts.len().min(32));
-        for part in parts {
-            merged = merge_phrase_counts(merged, part);
-        }
-        merged
-    } else {
-        let mut map = AHashMap::with_capacity(cap);
-        for i in 0..row_count {
-            if mask[i] {
-                let h = hash_str(phrase.str_at(i));
-                *map.entry(h).or_insert(0) += 1;
-            }
-        }
-        map
-    }
-}
-
 fn collect_top_phrase_rows(
     phrase: &Utf8ColumnScan,
     mask: &[bool],
-    row_count: usize,
+    sparse: &[usize],
     top_hashes: &AHashSet<u64>,
 ) -> AHashMap<u64, (String, Vec<usize>)> {
     let mut details = AHashMap::with_capacity(top_hashes.len());
-    for i in 0..row_count {
+    let mut consider = |i: usize| {
         if !mask[i] {
-            continue;
+            return;
         }
         let s = phrase.str_at(i);
         let h = hash_str(s);
         if !top_hashes.contains(&h) {
-            continue;
+            return;
         }
         details
             .entry(h)
             .or_insert_with(|| (s.to_string(), Vec::new()))
             .1
             .push(i);
+    };
+    if sparse.is_empty() {
+        for i in 0..mask.len() {
+            consider(i);
+        }
+    } else {
+        for &i in sparse {
+            consider(i);
+        }
     }
     details
 }
@@ -221,28 +273,25 @@ fn collect_top_phrase_rows(
 fn pass2_top_details(
     col_dir: &Path,
     mask: &[bool],
-    row_count: usize,
+    sparse: &[usize],
     top: &[(u64, u64)],
-    user_slice: &[i64],
+    users: &Int64ColumnScan,
 ) -> Result<Vec<Vec<String>>> {
     let top_hashes: AHashSet<u64> = top.iter().map(|(h, _)| *h).collect();
 
     let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
-    let details = collect_top_phrase_rows(&phrase, mask, row_count, &top_hashes);
+    let details = collect_top_phrase_rows(&phrase, mask, sparse, &top_hashes);
     drop(phrase);
 
     let url = Utf8ColumnScan::open(&col_dir.join("URL.col"))?;
-    let mut min_urls = AHashMap::with_capacity(details.len());
-    for (&h, (_, rows)) in &details {
-        min_urls.insert(h, min_utf8_at_rows(&url, rows));
-    }
-    drop(url);
-
     let title = Utf8ColumnScan::open(&col_dir.join("Title.col"))?;
+    let mut min_urls = AHashMap::with_capacity(details.len());
     let mut min_titles = AHashMap::with_capacity(details.len());
     for (&h, (_, rows)) in &details {
+        min_urls.insert(h, min_utf8_at_rows(&url, rows));
         min_titles.insert(h, min_utf8_at_rows(&title, rows));
     }
+    drop(url);
     drop(title);
 
     let mut out = Vec::with_capacity(top.len());
@@ -253,7 +302,7 @@ fn pass2_top_details(
             .unwrap_or(("", &[]));
         let min_url = min_urls.get(phrase_hash).map(String::as_str).unwrap_or("");
         let min_title = min_titles.get(phrase_hash).map(String::as_str).unwrap_or("");
-        let distinct = distinct_users_at_rows(user_slice, rows);
+        let distinct = distinct_users_at_rows(users, rows);
         out.push(vec![
             phrase_text.to_string(),
             min_url.to_string(),
@@ -278,10 +327,10 @@ fn min_utf8_at_rows(col: &Utf8ColumnScan, rows: &[usize]) -> String {
     min.unwrap_or("").to_string()
 }
 
-fn distinct_users_at_rows(users: &[i64], rows: &[usize]) -> usize {
+fn distinct_users_at_rows(users: &Int64ColumnScan, rows: &[usize]) -> usize {
     let mut set = AHashSet::with_capacity(rows.len().min(4096));
     for &i in rows {
-        set.insert(users[i]);
+        set.insert(users.at(i));
     }
     set.len()
 }
@@ -293,9 +342,10 @@ fn q23_execute_streaming(
     offset: usize,
 ) -> Result<Vec<Vec<String>>> {
     let mut mask = build_q23_mask(col_dir, row_count)?;
+    let sparse = matching_row_indices(&mask);
 
     let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
-    let counts = pass1_phrase_filter_and_counts(&phrase, &mut mask, row_count);
+    let counts = pass1_phrase_filter_and_counts(&phrase, &mut mask, &sparse, row_count);
     drop(phrase);
 
     if counts.is_empty() {
@@ -309,8 +359,8 @@ fn q23_execute_streaming(
     );
 
     let users = Int64ColumnScan::open(&col_dir.join("UserID.col"))?;
-    let user_slice = users.as_slice().to_vec();
+    let rows = pass2_top_details(col_dir, &mask, &sparse, &top, &users)?;
     drop(users);
 
-    pass2_top_details(col_dir, &mask, row_count, &top, &user_slice)
+    Ok(rows)
 }
