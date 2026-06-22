@@ -205,20 +205,49 @@ impl Table {
         let nrows = row_indices.len();
         let col_dir = self.path.join("columns");
 
-        // One column decode at a time — parallel read_cells_at OOM'd on SELECT * (80× LZ4).
-        let mut cells_by_col: Vec<Vec<String>> = Vec::with_capacity(ncols);
-        for col_meta in &self.meta.columns {
-            let col_cells = if let Ok(loaded) = self.column(&col_meta.name) {
-                row_indices
-                    .iter()
-                    .map(|&r| ColumnData::cell_to_string(loaded, r))
-                    .collect()
-            } else {
-                let path = col_dir.join(format!("{}.col", col_meta.name));
-                ColumnData::read_cells_at(&path, row_indices)?
-            };
-            cells_by_col.push(col_cells);
-        }
+        const PAR_MAX_ROWS: usize = 64;
+        const COL_BATCH: usize = 4;
+
+        let any_loaded = self
+            .meta
+            .columns
+            .iter()
+            .any(|c| self.is_column_loaded(&c.name));
+
+        let cells_by_col: Vec<Vec<String>> = if nrows <= PAR_MAX_ROWS
+            && ncols > COL_BATCH
+            && !any_loaded
+        {
+            // Q24 SELECT * — overlap LZ4 decode across columns (4 at a time; sequential OOM'd @ 80).
+            let mut out = Vec::with_capacity(ncols);
+            for chunk in self.meta.columns.chunks(COL_BATCH) {
+                use rayon::prelude::*;
+                let batch: Vec<Vec<String>> = chunk
+                    .par_iter()
+                    .map(|col_meta| {
+                        let path = col_dir.join(format!("{}.col", col_meta.name));
+                        ColumnData::read_cells_at(&path, row_indices)
+                    })
+                    .collect::<Result<_>>()?;
+                out.extend(batch);
+            }
+            out
+        } else {
+            let mut out = Vec::with_capacity(ncols);
+            for col_meta in &self.meta.columns {
+                let col_cells = if let Ok(loaded) = self.column(&col_meta.name) {
+                    row_indices
+                        .iter()
+                        .map(|&r| ColumnData::cell_to_string(loaded, r))
+                        .collect()
+                } else {
+                    let path = col_dir.join(format!("{}.col", col_meta.name));
+                    ColumnData::read_cells_at(&path, row_indices)?
+                };
+                out.push(col_cells);
+            }
+            out
+        };
 
         let mut rows: Vec<Vec<String>> = (0..nrows).map(|_| Vec::with_capacity(ncols)).collect();
         for col_cells in cells_by_col {
