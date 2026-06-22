@@ -2,7 +2,7 @@
 
 **Baseline:** warm-serve 100M on `c6a.4xlarge` @ [`eb414c9`](https://github.com/tylerhannan/coldrun/commit/eb414c9) — see [`benchmarks/cloud-100m/`](benchmarks/cloud-100m/) and [`PERF.md`](PERF.md).
 
-**Goal:** shrink the **~681s** hot sum (all 43; Q23 smoke) toward ClickHouse **~32s**, without regressing 1M correctness (**43/43** vs CH) or warm-serve stability on 32 GiB.
+**Goal:** shrink the **~674s** hot sum (all 43) toward ClickHouse **~32s**, without regressing 1M correctness (**43/43** vs CH) or warm-serve stability on 32 GiB.
 
 ---
 
@@ -10,22 +10,20 @@
 
 | # | Item | Why | Action |
 |---|------|-----|--------|
-| 0.1 | **Merge warning cleanup** | Clean build signal before perf work | [PR #1](https://github.com/tylerhannan/coldrun/pull/1) (`chore/warning-cleanup`) |
-| 0.2 | **Formal Q23 bench** | Only smoke (~234s); skews totals | `./scripts/bench-serve.sh 100000000 --skip-load --from 23` on cloud VM |
+| 0.1 | ~~**Merge warning cleanup**~~ | Clean build signal before perf work | Done — merged [PR #1](https://github.com/tylerhannan/coldrun/pull/1) @ `118e60d` |
+| 0.2 | ~~**Formal Q23 bench**~~ | Only smoke (~234s); skews totals | Done — hot **226.820s** @ `118e60d` ([291.8, 230.7, 226.8]); log `/data/bench-q23-formal.log` |
 | 0.3 | **Re-bench after each P1 fix** | Hot = min(try 2, 3); update [`cloud-100m/serve-hot.md`](benchmarks/cloud-100m/serve-hot.md) | `./scripts/bench-serve.sh 100000000 --skip-load --write-snapshot` |
 
 ---
 
-## P1 — Outliers (~465s of ~681s; fix these first)
+## P1 — Outliers (~458s of ~674s; fix these first)
 
 Full-column utf8 decode on 100M rows dominates. Same fix class: **scan compressed bytes block-at-a-time** (LIKE / empty checks) and **project only needed cells** (sidecar `.col.idx` already exists).
 
 | # | Query | CR hot | CH hot | Work | Code |
 |---|-------|--------|--------|------|------|
 | 1.1 | **Q24** | 231s | 0.10s | Stream URL LIKE without full LZ4 expand; `read_cells_at` for 10 rows × ~80 cols without per-column full decode | [`scan_stream.rs`](../crates/coldrun-core/src/exec/scan_stream.rs), [`table.rs`](../crates/coldrun-core/src/storage/table.rs) |
-| 1.2 | **Q23** | 234s* | 0.61s | Block scan Title / URL / SearchPhrase in mask + count + batched pass2 (7 passes today, each still full-column) | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
-
-\* Q23 smoke only — see P0.2.
+| 1.2 | **Q23** | 227s | 0.61s | Block scan Title / URL / SearchPhrase in mask + count + batched pass2 (7 passes today, each still full-column) | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
 
 **Success target:** each ≪ **60s** on warm serve (stretch: ≪ **10s**).
 

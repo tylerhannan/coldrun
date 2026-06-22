@@ -27,7 +27,7 @@
 | 20 | 0.062 | 0.002 | 31.0× | +0.06 |
 | 21 | 4.467 | 0.305 | 14.6× | +4.16 |
 | 22 | 4.907 | 0.088 | 55.8× | +4.82 |
-| 23 | 234.1* | 0.613 | 382× | +233.5 |
+| 23 | 226.820 | 0.613 | 370× | +226.2 |
 | 24 | 231.3 | 0.098 | 2360× | +231.2 |
 | 25 | 0.008 | 0.038 | 0.2× | −0.03 |
 | 26 | 0.274 | 0.152 | 1.8× | +0.12 |
@@ -49,14 +49,12 @@
 | 42 | 1.610 | 0.011 | 146× | +1.60 |
 | 43 | 1.312 | 0.008 | 164× | +1.30 |
 
-\* Q23: isolated smoke after streaming fix; formal 3-try bench skipped (resumed at Q24).
-
-**Overall:** CR **~681s** (all 43, Q23 smoke) vs CH **~32s** (~21×). Excluding Q23/Q24, tail Q25–43 sum is **~170s** vs CH **~23s**.
+**Overall:** CR **~674s** (all 43) vs CH **~32s** (~21×). Excluding Q23/Q24, tail Q25–43 sum is **~170s** vs CH **~23s**.
 
 ## Slowest vs CH (ratio)
 
 1. Q24 — full URL scan + sequential `SELECT *` project (~231s vs 0.10s)
-2. Q23 — disk-streaming two-phase agg (~234s smoke vs 0.61s)
+2. Q23 — disk-streaming two-phase agg (~227s formal vs 0.61s)
 3. Q36 — REGEXP_REPLACE + GROUP BY (~83s vs 0.25s)
 4. Q41 — 5-column dashboard GROUP BY (~7.5s vs 0.013s)
 5. Q14 — phrase + COUNT DISTINCT (~9.2s vs 0.75s)
