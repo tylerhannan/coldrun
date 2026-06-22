@@ -192,6 +192,7 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | **100M Q23 formal** | `118e60d` — hot **226.820s** (tries 291.8 / 230.7 / 226.8); was smoke 234s |
 | **100M Q24 streaming** | `e40ed01` — disk top-K; serve survives |
 | **100M Q24 project OOM** | `eb414c9` — sequential `project_rows`; Q24 **231s** hot, serve alive |
+| **100M Q24 parallel (failed)** | `6b64ee7` — rayon scan + 4-wide project; hot **262.3s** (+13%); reverted — see [`NEXT.md`](NEXT.md#p1-follow-up--failed-parallel-attempt-6b64ee7-reverted) |
 | **100M warm bench done** | Q1–22 + Q24–43 @ `eb414c9` — [`cloud-100m/`](benchmarks/cloud-100m/) |
 
 ## Next (planned)

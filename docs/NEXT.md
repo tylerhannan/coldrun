@@ -22,12 +22,22 @@ Full-column utf8 decode on 100M rows dominates. Same fix class: **scan compresse
 
 | # | Query | CR hot | CH hot | Work | Code |
 |---|-------|--------|--------|------|------|
-| 1.1 | **Q24** | 231s | 0.10s | Stream URL LIKE without full LZ4 expand; `read_cells_at` for 10 rows × ~80 cols without per-column full decode | [`scan_stream.rs`](../crates/coldrun-core/src/exec/scan_stream.rs), [`table.rs`](../crates/coldrun-core/src/storage/table.rs) |
+| 1.1 | **Q24** | 231s | 0.10s | **Follow-up:** block-at-a-time URL scan + cell-at projection without full LZ4 expand (see below) | [`scan_stream.rs`](../crates/coldrun-core/src/exec/scan_stream.rs), [`table.rs`](../crates/coldrun-core/src/storage/table.rs) |
 | 1.2 | **Q23** | 227s | 0.61s | Block scan Title / URL / SearchPhrase in mask + count + batched pass2 (7 passes today, each still full-column) | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
 
 **Success target:** each ≪ **60s** on warm serve (stretch: ≪ **10s**).
 
 Detail: [`perf/q-23.md`](perf/q-23.md), [`perf/q-24.md`](perf/q-24.md).
+
+### P1 follow-up — failed parallel attempt (`6b64ee7`, reverted)
+
+| Item | Result |
+|------|--------|
+| **Change** | Rayon row-range URL/EventTime top-K + 4-wide parallel `project_rows` |
+| **Bench** | Formal 3-try @ 100M — tries [352.9, 280.6, 262.3], hot **262.3s** |
+| **vs baseline** | **231.3s** @ `eb414c9` — **+13% regression** (likely LZ4 memory/CPU contention) |
+| **Log** | `/data/bench-q24-formal.log` on bench VM |
+| **Action** | Reverted parallel paths; real win needs **streaming decode** (not more rayon on full-column LZ4) |
 
 ---
 
