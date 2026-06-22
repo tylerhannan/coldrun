@@ -20,6 +20,21 @@ grep -E "hot |EXIT" /data/<name>.log  # progress without attach
 
 **Do not** run `bench-serve.sh`, `benchmark.sh`, or `bench-clickhouse-parquet.sh` directly in SSH unless wrapped in tmux as above.
 
+## Rule: commit + push after every step
+
+On the laptop (before starting a cloud bench):
+
+1. `cargo build --release -p coldrun-cli` and `./scripts/smoke-all.sh 100000` (or `validate-parquet.sh` for correctness-sensitive changes)
+2. **`git commit` + `git push origin main`** — VM pulls `main`; never bench uncommitted code on the cloud box
+3. Start tmux bench on the VM (`git pull` inside the session or immediately before)
+
+After bench results land:
+
+4. Update [`NEXT.md`](../NEXT.md), [`PERF.md`](../PERF.md), and/or [`cloud-100m/`](../benchmarks/cloud-100m/) as needed
+5. **`git commit` + `git push origin main`** again
+
+Do not leave doc updates or code changes local-only between steps.
+
 ## Current dev box (Jun 2026)
 
 | Item | Value |

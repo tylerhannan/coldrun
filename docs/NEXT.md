@@ -6,6 +6,8 @@
 
 **How to bench:** tiered workflow in [`benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md#iteration-tiers-when-to-use-100m) — most iterations on laptop 1M; 100M VM only for scale-sensitive milestones (tmux required on cloud).
 
+**Workflow (every step):** smoke/validate locally → **commit + push to `main`** → tmux bench on VM (if scale-sensitive) → update docs + **commit + push** again with bench results.
+
 ---
 
 ## P0 — Hygiene (do first)
@@ -125,9 +127,11 @@ Do not regress:
 
 ## Suggested order of execution
 
+Each bullet: **implement → smoke/validate → commit + push → tmux bench (if 100M) → docs → commit + push**.
+
 1. P0.1 → P1.1 (Q24) → re-bench → P1.2 (Q23) → re-bench  
 2. P2.1 (Q36) → P2.2 (Q41) → P2.3 (Q33–35)  
 3. P4.1 (shared string scan) — unlocks P3 and most of P4 in one pass  
 4. P6.1–6.3 when warm sum is within ~2–5× of CH on tail queries  
 
-When an item ships, update [`PERF.md`](PERF.md) changelog and the relevant [`perf/q-*.md`](perf/) note.
+When an item ships, update [`PERF.md`](PERF.md) changelog and the relevant [`perf/q-*.md`](perf/) note, then **commit + push**.
