@@ -79,3 +79,41 @@ HITS_PARQUET=/data/hits.parquet COLDRUN_DATA=/data/coldrun ./clickbench/coldrun/
 ```
 
 Until you have real Parquet locally, treat demo `bench-all` / `bench-serve` numbers as **relative** on one machine only.
+
+## Iteration tiers (when to use 100M)
+
+**Not every perf change needs a full 100M VM run.** Use the cheapest tier that can falsify your hypothesis; promote to 100M only for scale-sensitive work.
+
+| Tier | Where | Rows | Time | Use for |
+|------|-------|------|------|---------|
+| **1** | Laptop | 100k demo | seconds | `smoke-all`, `bench-all`, `bench-serve --queries N` — correctness, fast-path wiring |
+| **2** | Laptop | 1M Parquet slice | minutes | `validate-parquet.sh`, `measure-parquet.sh`, `bench-serve` @ 1M — real utf8/GROUP BY, CH compare |
+| **3** | VM (tmux) | 1M–10M sample | tens of min | `sample-parquet.sh` + load + `bench-serve` — cloud warm-serve without 33 GiB load |
+| **4** | VM (tmux) | **100M** | hours | OOM, full LZ4 scan cost, `cloud-100m/` snapshots, ClickBench Combined |
+
+**Requires 100M (tier 4):**
+
+- Q23/Q24 absolute hot time (dominated by full-column decompress @ ~100M)
+- Memory / OOM fixes on 32 GiB (`c6a.4xlarge`)
+- Parallelism / concurrency tuning (rayon batch size — can regress only at scale)
+- Updating [`cloud-100m/serve-hot.md`](cloud-100m/serve-hot.md) or official Combined
+
+**Tier 1–2 is enough for:** dispatch logic, correctness, most GROUP BY / sort paths, 1M hot regression.
+
+**Tier 3** optional middle ground on the bench VM:
+
+```bash
+# tmux — see CLOUD-RUN.md
+./scripts/sample-parquet.sh /data/hits.parquet 10000000 /data/hits-10m.parquet
+COLDRUN_DATA=/data/coldrun-10m ./clickbench/coldrun/load
+./scripts/bench-serve.sh 10000000 --skip-load --from 23 --to 24
+```
+
+**Tier 4** single-query while iterating an outlier (tmux + tee):
+
+```bash
+./scripts/bench-serve.sh 100000000 --skip-load --from 24 --to 24
+```
+
+Full 43-query re-bench only at milestones — see [`NEXT.md`](../NEXT.md) P0.3.
+
