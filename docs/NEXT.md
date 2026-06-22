@@ -8,6 +8,19 @@
 
 **Workflow (every step):** smoke/validate locally → **commit + push to `main`** → tmux bench on VM (if scale-sensitive) → update docs + **commit + push** again with bench results.
 
+## Acceleration strategy (2026-06 reset)
+
+Before more micro-tuning, prioritize structural changes that can produce order-of-magnitude gains:
+
+1. **Reliability first:** fix Q23 "silent exit" and force explicit error output in bench logs before any further perf claims.
+2. **Instrument phases:** add per-phase timings + bytes-decompressed counters for Q23/Q24 (mask, count, top-k, pass2, projection).
+3. **Stop wide parallel decode:** avoid rayon over full-column LZ4 work; only parallelize bounded/sparse work.
+4. **Blockized read path (main lever):** add block metadata + block iterators so LIKE/filter/top-k can run block-at-a-time without full-column decompress.
+5. **Apply in order:** Q24 first (best stress case for late materialization), then Q23, then propagate pattern to Q21/Q22/Q36/Q41.
+6. **Benchmark discipline:** isolated single-query runs are diagnostic; canonical numbers come from full warm runs and documented snapshots.
+
+Target trajectory: Q23/Q24 **<120s** first milestone, then **<60s**, then tail-sum reduction before Combined submission.
+
 ---
 
 ## P0 — Hygiene (do first)
