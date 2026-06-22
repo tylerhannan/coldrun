@@ -41,6 +41,16 @@ Detail: [`perf/q-23.md`](perf/q-23.md), [`perf/q-24.md`](perf/q-24.md).
 | **Log** | `/data/bench-q24-formal.log` on bench VM |
 | **Action** | Reverted parallel paths; real win needs **streaming decode** (not more rayon on full-column LZ4) |
 
+### P1 follow-up — revert verify (`2419ade`)
+
+| Item | Result |
+|------|--------|
+| **Change** | Restore sequential URL/EventTime top-K + sequential `project_rows` |
+| **Bench** | Isolated 3-try @ 100M (tmux `bench-q24-verify`) — tries [262.0, 257.9, 281.4], hot **257.854s** |
+| **vs baseline** | **231.3s** @ `eb414c9` — still **~+11%** on isolated re-bench |
+| **Log** | `/data/bench-q24-verify.log` on bench VM (`52.17.231.129`) |
+| **Note** | Canonical Q24 in [`serve-hot.md`](benchmarks/cloud-100m/serve-hot.md) stays **231.3s** (from full warm run); isolated re-bench may differ (cache/VM state). Full warm re-bench if numbers diverge again. |
+
 ---
 
 ## P2 — High ratio, large Δ (tail Q25–43)
