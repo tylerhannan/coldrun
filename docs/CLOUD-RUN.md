@@ -2,12 +2,30 @@
 
 Use this for **100M-row** runs on AWS. Laptop 1M numbers are regression only; Combined score needs the full protocol on `c6a.4xlarge`.
 
+## Rule: always tmux on the VM
+
+**Every** long cloud job — `git pull`, `cargo build`, bench, load, ClickHouse compare — must run inside **detached tmux**. SSH disconnect or laptop unplug must not kill the process.
+
+```bash
+# Pattern: build/pull in foreground is OK; bench always tmux + tee
+tmux new-session -d -s <name> \
+  'source $HOME/.cargo/env && cd ~/coldrun && \
+   export COLDRUN_ROOT=$PWD COLDRUN_DATA=/data/coldrun PATH=$HOME/.cargo/bin:$PATH && \
+   <command> 2>&1 | tee /data/<name>.log; echo EXIT:$? >> /data/<name>.log'
+
+tmux ls                              # list sessions
+tmux attach -t <name>                # watch (Ctrl+B D to detach)
+grep -E "hot |EXIT" /data/<name>.log  # progress without attach
+```
+
+**Do not** run `bench-serve.sh`, `benchmark.sh`, or `bench-clickhouse-parquet.sh` directly in SSH unless wrapped in tmux as above.
+
 ## Current dev box (Jun 2026)
 
 | Item | Value |
 |------|--------|
 | Instance | **c6a.4xlarge** (16 vCPU, 32 GiB) |
-| SSH | `ssh -i ~/Downloads/coldrun-bench.pem ubuntu@34.244.176.182` |
+| SSH | `ssh -i ~/Downloads/coldrun-bench.pem ubuntu@52.17.231.129` |
 | Repo | `~/coldrun` on `main` |
 | Parquet | `/data/hits.parquet` |
 | Coldrun data | `COLDRUN_DATA=/data/coldrun` (27 columns under `hits/columns/`, ~33 GiB) |
@@ -130,6 +148,24 @@ tmux new-session -d -s warm-cr \
 ```
 
 Resume from a query after a crash (fresh serve loads new binary):
+
+```bash
+tmux new-session -d -s bench-qN \
+  'source $HOME/.cargo/env && cd ~/coldrun && export COLDRUN_ROOT=$PWD COLDRUN_DATA=/data/coldrun PATH=$HOME/.cargo/bin:$PATH && \
+   ./scripts/bench-serve.sh 100000000 --skip-load --from N --to N --no-compare \
+   2>&1 | tee /data/bench-qN-formal.log; echo EXIT:$? >> /data/bench-qN-formal.log'
+```
+
+Full warm re-bench with snapshot:
+
+```bash
+tmux new-session -d -s warm-full \
+  'source $HOME/.cargo/env && cd ~/coldrun && export COLDRUN_ROOT=$PWD COLDRUN_DATA=/data/coldrun PATH=$HOME/.cargo/bin:$PATH && \
+   ./scripts/bench-serve.sh 100000000 --skip-load --write-snapshot \
+   2>&1 | tee /data/bench-warm-full.log; echo EXIT:$? >> /data/bench-warm-full.log'
+```
+
+Older example (resume tail):
 
 ```bash
 tmux new-session -d -s rebench-tail \

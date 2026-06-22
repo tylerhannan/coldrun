@@ -12,7 +12,7 @@
 |---|------|-----|--------|
 | 0.1 | ~~**Merge warning cleanup**~~ | Clean build signal before perf work | Done — merged [PR #1](https://github.com/tylerhannan/coldrun/pull/1) @ `118e60d` |
 | 0.2 | ~~**Formal Q23 bench**~~ | Only smoke (~234s); skews totals | Done — hot **226.820s** @ `118e60d` ([291.8, 230.7, 226.8]); log `/data/bench-q23-formal.log` |
-| 0.3 | **Re-bench after each P1 fix** | Hot = min(try 2, 3); update [`cloud-100m/serve-hot.md`](benchmarks/cloud-100m/serve-hot.md) | `./scripts/bench-serve.sh 100000000 --skip-load --write-snapshot` |
+| 0.3 | **Re-bench after each P1 fix** | Hot = min(try 2, 3); update [`cloud-100m/serve-hot.md`](benchmarks/cloud-100m/serve-hot.md) | tmux + `./scripts/bench-serve.sh 100000000 --skip-load --write-snapshot` — see [`CLOUD-RUN.md`](CLOUD-RUN.md) |
 
 ---
 
