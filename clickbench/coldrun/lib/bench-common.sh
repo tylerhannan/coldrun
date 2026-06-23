@@ -1,6 +1,7 @@
 #!/bin/bash
 # Shared ClickBench-format driver for coldrun (repo-local; no upstream tree required).
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "bench: failed at ${BASH_SOURCE[0]}:${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 : "${BENCH_RESTARTABLE:=yes}"
 : "${BENCH_DURABLE:=yes}"
@@ -100,10 +101,18 @@ bench_run_query() {
     errf=$(mktemp)
     printf '%s\n' "$query" | ./query >/dev/null 2>"$errf" && exit_code=0 || exit_code=$?
     if [ "$exit_code" -eq 0 ]; then
-      timing=$(tr '\r' '\n' <"$errf" | grep -E '^[0-9]+(\.[0-9]+)?$' | tail -n1)
-      [ -z "$timing" ] && timing="null"
+      # Some failures return 0 but omit numeric timing; do not abort the whole bench.
+      timing=$(tr '\r' '\n' <"$errf" | grep -E '^[0-9]+(\.[0-9]+)?$' | tail -n1 || true)
+      if [ -z "$timing" ]; then
+        timing="null"
+        echo "bench: missing numeric timing for Q${query_num} try ${i} (exit 0)" >&2
+        if [ -s "$errf" ]; then
+          sed 's/^/    /' "$errf" >&2
+        fi
+      fi
     else
       timing="null"
+      echo "bench: query failed for Q${query_num} try ${i} (exit ${exit_code})" >&2
       cat "$errf" >&2
     fi
     rm -f "$errf"
