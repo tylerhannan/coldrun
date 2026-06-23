@@ -34,6 +34,7 @@ Target trajectory: Q23/Q24 **<120s** first milestone, then **<60s**, then tail-s
    - Q24: URL LIKE scan block-by-block, maintain top-k row ids by EventTime, late-materialize final rows/cols.
    - Q23: block mask + block phrase count + block batched pass2; avoid full-column scans on sparse masks.
    - Expected impact: move from ~200s class toward tens of seconds.
+   - ✅ Q24 scan path now uses `Table::column_block_reader()` + block-by-block LIKE/top-k (V1-compatible; true multi-block benefit when V2 sidecars are populated).
 
 3. **Add phase-level perf accounting (must-have).**
    - For Q23/Q24 log: bytes decompressed per column, blocks read, rows tested, rows materialized, phase timings.
