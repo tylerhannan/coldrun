@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::column_blocks::{encode_v1_single_block, write_blocks_sidecar, ColumnBlockReader};
 use super::column::{ColumnData, ColumnType};
 use super::zones::ZoneIndex;
 use crate::Result;
@@ -107,6 +108,32 @@ impl Table {
             .iter()
             .find(|c| c.name == name)
             .map(|c| c.ty)
+    }
+
+    /// Open a block reader for a single on-disk column (V2 sidecar if present, V1 fallback).
+    pub fn column_block_reader(&self, name: &str) -> Result<ColumnBlockReader> {
+        if !self.meta.columns.iter().any(|c| c.name == name) {
+            return Err(crate::Error::msg(format!("unknown column '{name}'")));
+        }
+        let col_path = self.path.join("columns").join(format!("{name}.col"));
+        if !col_path.exists() {
+            return Err(crate::Error::msg(format!("column file missing: {name}")));
+        }
+        ColumnBlockReader::open(col_path)
+    }
+
+    /// Write a baseline block sidecar for an existing V1 `.col` file.
+    /// This preserves V1 storage and allows consumers to switch to block APIs incrementally.
+    pub fn write_v1_blocks_sidecar(&self, name: &str) -> Result<()> {
+        if !self.meta.columns.iter().any(|c| c.name == name) {
+            return Err(crate::Error::msg(format!("unknown column '{name}'")));
+        }
+        let col_path = self.path.join("columns").join(format!("{name}.col"));
+        if !col_path.exists() {
+            return Err(crate::Error::msg(format!("column file missing: {name}")));
+        }
+        let sidecar = encode_v1_single_block(&col_path)?;
+        write_blocks_sidecar(&col_path, &sidecar)
     }
 
     pub fn column(&self, name: &str) -> Result<&ColumnData> {

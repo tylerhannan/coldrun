@@ -28,6 +28,7 @@ Target trajectory: Q23/Q24 **<120s** first milestone, then **<60s**, then tail-s
    - Track per-block compressed boundaries and expose cheap `read_block(block_id)` / `iter_blocks()`.
    - Keep V1 fallback compatibility for existing `.col` files.
    - Goal: never decompress full 100M columns when only a subset of blocks is needed.
+   - ✅ Scaffold landed: `storage::column_blocks` + `Table::column_block_reader()` + `Table::write_v1_blocks_sidecar()` with V1 fallback.
 
 2. **Rewrite Q24 and Q23 to consume block readers.**
    - Q24: URL LIKE scan block-by-block, maintain top-k row ids by EventTime, late-materialize final rows/cols.
