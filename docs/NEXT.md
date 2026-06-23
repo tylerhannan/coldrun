@@ -53,7 +53,7 @@ Target trajectory: Q23/Q24 **<120s** first milestone, then **<60s**, then tail-s
 | # | Item | Why | Action |
 |---|------|-----|--------|
 | 0.1 | ~~**Merge warning cleanup**~~ | Clean build signal before perf work | Done — merged [PR #1](https://github.com/tylerhannan/coldrun/pull/1) @ `118e60d` |
-| 0.2 | ~~**Formal Q23 bench**~~ | Only smoke (~234s); skews totals | Done — hot **226.820s** @ `118e60d` ([291.8, 230.7, 226.8]); log `/data/bench-q23-formal.log` |
+| 0.2 | ~~**Formal Q23 bench**~~ | Only smoke (~234s); skews totals | Done — hot **222.341s** @ `dde9184` ([238.8, 229.9, 222.3]); log `/data/bench-q23-fix3.log` |
 | 0.3 | **Re-bench after each P1 fix** | Hot = min(try 2, 3); update [`cloud-100m/serve-hot.md`](benchmarks/cloud-100m/serve-hot.md) | tmux + `./scripts/bench-serve.sh 100000000 --skip-load --write-snapshot` — see [`CLOUD-RUN.md`](CLOUD-RUN.md) |
 
 ---
@@ -65,7 +65,7 @@ Full-column utf8 decode on 100M rows dominates. Same fix class: **scan compresse
 | # | Query | CR hot | CH hot | Work | Code |
 |---|-------|--------|--------|------|------|
 | 1.1 | **Q24** | 231s | 0.10s | **Follow-up:** block-at-a-time URL scan + cell-at projection without full LZ4 expand (see below) | [`scan_stream.rs`](../crates/coldrun-core/src/exec/scan_stream.rs), [`table.rs`](../crates/coldrun-core/src/storage/table.rs) |
-| 1.2 | **Q23** | 227s | 0.61s | **In progress:** combined Title+URL mask pass, sparse row indices, no UserID `to_vec` copy — bench pending | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
+| 1.2 | **Q23** | 222s | 0.61s | In progress: stable OOM-safe pass2 (row-slot map) shipped; next is block-at-a-time decode to push below 120s | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
 
 **Success target:** each ≪ **60s** on warm serve (stretch: ≪ **10s**).
 

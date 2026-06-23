@@ -32,7 +32,7 @@ Complete warm-serve run on AWS `c6a.4xlarge` (32 GiB), `/data/coldrun` ~100M row
 | **Q1–22 sum** | **46.0s** | ~9.6s |
 | **Q24–43 sum** | **401.1s** | ~22.8s |
 | **42 queries** (bench; Q23 skipped) | **447.1s** | **~32.4s** |
-| **All 43** | **674.0s** | **~32.4s** |
+| **All 43** | **669.4s** | **~32.4s** |
 
 **Commit:** `eb414c9` · **Log:** `/data/bench-warm-full.log`
 
@@ -41,7 +41,7 @@ Complete warm-serve run on AWS `c6a.4xlarge` (32 GiB), `/data/coldrun` ~100M row
 | Q14 | 9.2s | 0.75s | sort distinct still ~12× |
 | Q17–19 | 3.2s / 1.2s / 3.4s | 1.6s / 0.94s / 2.7s | sort agg (was 12s / 21s / 27s pre-fix) |
 | Q21–22 | 4.5s / 4.9s | 0.31s / 0.09s | string GROUP BY |
-| Q23 | 227s | 0.61s | disk streaming (`group_fused_q23.rs`); formal 3-try @ `118e60d` |
+| Q23 | 222s | 0.61s | disk streaming (`group_fused_q23.rs`); formal 3-try @ `dde9184` |
 | Q24 | 231s | 0.10s | disk top-K + sequential `project_rows` (`scan_stream.rs`) |
 | Q25 | 0.008s | 0.038s | **CR wins** |
 | Q29 | 7.9s | 9.6s | **CR wins** |
@@ -51,7 +51,7 @@ Complete warm-serve run on AWS `c6a.4xlarge` (32 GiB), `/data/coldrun` ~100M row
 
 Runbook: [`CLOUD-RUN.md`](CLOUD-RUN.md).
 
-Q23 formal bench (Jun 2026): hot **226.820s** — tries [291.8, 230.7, 226.8] @ `118e60d`, log `/data/bench-q23-formal.log`.
+Q23 formal bench (Jun 2026): hot **222.341s** — tries [238.8, 229.9, 222.3] @ `dde9184`, log `/data/bench-q23-fix3.log`.
 
 ## Sort-based aggregation (`agg_sort.rs`, Jun 2026)
 
@@ -189,7 +189,7 @@ Measurement guide: [`docs/benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md)
 | columnar pass | Fused columnar Q36/Q41 — correctness ✓; Q36/Q41 ~0.13s each on 1M (was ~0.22s) |
 | **100M sort agg** | `4965730` — `agg_sort.rs`; Q36/Q41 sort paths; Q17/Q19 sort top-K |
 | **100M Q14/Q18** | `0a65cf6` — Q14 hash-only distinct sort; Q18 first-LIMIT-groups |
-| **100M Q23 formal** | `118e60d` — hot **226.820s** (tries 291.8 / 230.7 / 226.8); was smoke 234s |
+| **100M Q23 formal** | `dde9184` — hot **222.341s** (tries 238.8 / 229.9 / 222.3); was smoke 234s |
 | **100M Q24 streaming** | `e40ed01` — disk top-K; serve survives |
 | **100M Q24 project OOM** | `eb414c9` — sequential `project_rows`; Q24 **231s** hot, serve alive |
 | **100M Q24 parallel (failed)** | `6b64ee7` — rayon scan + 4-wide project; hot **262.3s** (+13%); reverted — see [`NEXT.md`](NEXT.md#p1-follow-up--failed-parallel-attempt-6b64ee7-reverted) |

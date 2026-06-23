@@ -1,10 +1,10 @@
 # Serve hot — 100M rows (c6a.4xlarge)
 
 **VM:** AWS `c6a.4xlarge` (32 GiB), `/data/coldrun` (~100M rows, ~33 GiB on disk)  
-**Command:** `./scripts/bench-serve.sh 100000000 --skip-load` (Q1–22 + Q24–43); Q23 formal 3-try @ `118e60d` separate  
+**Command:** `./scripts/bench-serve.sh 100000000 --skip-load` (Q1–22 + Q24–43); Q23 formal 3-try @ `dde9184` separate  
 **Protocol:** warm `serve`, 3 tries/query, hot = min(try 2, try 3)  
-**Commit:** `eb414c9` (Q24 streaming + sequential `project_rows`); Q23 formal @ `118e60d`  
-**Log:** `/data/bench-warm-full.log` (Q1–22, Q24–43); `/data/bench-q23-formal.log` (Q23)
+**Commit:** `eb414c9` (Q24 streaming + sequential `project_rows`); Q23 formal @ `dde9184`  
+**Log:** `/data/bench-warm-full.log` (Q1–22, Q24–43); `/data/bench-q23-fix3.log` (Q23)
 
 | Q | hot (s) | Notes |
 |---|---------|-------|
@@ -30,7 +30,7 @@
 | 20 | 0.062 | |
 | 21 | 4.467 | |
 | 22 | 4.907 | |
-| 23 | 226.820 | formal 3-try @ `118e60d` — tries [291.8, 230.7, 226.8] |
+| 23 | 222.341 | formal 3-try @ `dde9184` — tries [238.8, 229.9, 222.3] |
 | 24 | 231.3 | |
 | 25 | 0.008 | |
 | 26 | 0.274 | |
@@ -59,6 +59,6 @@
 | Q1–22 | 46.0s | ~9.6s |
 | Q24–43 | 401.1s | ~22.8s |
 | Q1–22 + Q24–43 (42 queries) | **447.1s** | **~32.4s** |
-| All 43 | **674.0s** | **~32.4s** |
+| All 43 | **669.4s** | **~32.4s** |
 
 Not ClickBench Combined (no cold protocol, no `drop_caches` per query). See [`compare-hot.md`](compare-hot.md).
