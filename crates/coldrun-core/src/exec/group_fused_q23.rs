@@ -79,30 +79,37 @@ fn build_q23_mask(col_dir: &Path, row_count: usize) -> Result<Vec<bool>> {
     use rayon::prelude::*;
 
     let title = Utf8ColumnScan::open(&col_dir.join("Title.col"))?;
-    let url = Utf8ColumnScan::open(&col_dir.join("URL.col"))?;
     let mut mask = vec![false; row_count];
 
     if row_count >= PARALLEL_THRESHOLD {
         mask.par_iter_mut()
             .enumerate()
             .for_each(|(i, slot)| {
-                if memchr::memmem::find(title.str_at(i).as_bytes(), b"Google").is_some()
-                    && memchr::memmem::find(url.str_at(i).as_bytes(), b".google.").is_none()
-                {
-                    *slot = true;
+                *slot = memchr::memmem::find(title.str_at(i).as_bytes(), b"Google").is_some();
+            });
+    } else {
+        for i in 0..row_count {
+            mask[i] = memchr::memmem::find(title.str_at(i).as_bytes(), b"Google").is_some();
+        }
+    }
+    drop(title);
+
+    let url = Utf8ColumnScan::open(&col_dir.join("URL.col"))?;
+    if row_count >= PARALLEL_THRESHOLD {
+        mask.par_iter_mut()
+            .enumerate()
+            .for_each(|(i, slot)| {
+                if *slot && memchr::memmem::find(url.str_at(i).as_bytes(), b".google.").is_some() {
+                    *slot = false;
                 }
             });
     } else {
         for i in 0..row_count {
-            if memchr::memmem::find(title.str_at(i).as_bytes(), b"Google").is_some()
-                && memchr::memmem::find(url.str_at(i).as_bytes(), b".google.").is_none()
-            {
-                mask[i] = true;
+            if mask[i] && memchr::memmem::find(url.str_at(i).as_bytes(), b".google.").is_some() {
+                mask[i] = false;
             }
         }
     }
-
-    drop(title);
     drop(url);
     Ok(mask)
 }
