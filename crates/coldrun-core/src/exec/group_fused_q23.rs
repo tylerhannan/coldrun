@@ -5,6 +5,7 @@
 //! SearchPhrase filter+count, UserID, then one batched pass2 (SearchPhrase+URL+Title) for top-K.
 
 use std::path::Path;
+use std::time::Instant;
 
 use ahash::{AHashMap, AHashSet};
 
@@ -21,6 +22,52 @@ const PARALLEL_THRESHOLD: usize = 250_000;
 const COUNT_SHARDS: usize = 256;
 
 const Q23_COLS: &[&str] = &["URL", "Title", "SearchPhrase", "UserID"];
+
+fn file_bytes(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+#[derive(Default)]
+struct Q23Perf {
+    blocks_read: u64,
+    comp_title: u64,
+    comp_url: u64,
+    comp_phrase: u64,
+    comp_user: u64,
+    dec_title: u64,
+    dec_url: u64,
+    dec_phrase: u64,
+    dec_user: u64,
+    rows_tested: usize,
+    rows_after_mask: usize,
+    rows_after_phrase: usize,
+    rows_materialized: usize,
+}
+
+impl Q23Perf {
+    fn add_scan(&mut self, col: &str, comp: u64, dec: u64) {
+        self.blocks_read += 1;
+        match col {
+            "Title" => {
+                self.comp_title += comp;
+                self.dec_title += dec;
+            }
+            "URL" => {
+                self.comp_url += comp;
+                self.dec_url += dec;
+            }
+            "SearchPhrase" => {
+                self.comp_phrase += comp;
+                self.dec_phrase += dec;
+            }
+            "UserID" => {
+                self.comp_user += comp;
+                self.dec_user += dec;
+            }
+            _ => {}
+        }
+    }
+}
 
 pub fn try_fused_q23_streaming(db: &mut Database, parsed: &ParsedQuery) -> Result<Option<QueryResult>> {
     if !is_q23_shape(parsed) {
@@ -73,10 +120,12 @@ fn is_col(e: &sqlparser::ast::Expr, name: &str) -> bool {
     crate::sql::expr_column_name(e).as_deref() == Some(name)
 }
 
-fn build_q23_mask(col_dir: &Path, row_count: usize) -> Result<Vec<bool>> {
+fn build_q23_mask(col_dir: &Path, row_count: usize, perf: &mut Q23Perf) -> Result<Vec<bool>> {
     use rayon::prelude::*;
 
-    let title = Utf8ColumnScan::open(&col_dir.join("Title.col"))?;
+    let title_path = col_dir.join("Title.col");
+    let title = Utf8ColumnScan::open(&title_path)?;
+    perf.add_scan("Title", file_bytes(&title_path), title.decompressed_bytes() as u64);
     let mut mask = vec![false; row_count];
     if row_count >= PARALLEL_THRESHOLD {
         mask.par_iter_mut()
@@ -91,7 +140,9 @@ fn build_q23_mask(col_dir: &Path, row_count: usize) -> Result<Vec<bool>> {
     }
     drop(title);
 
-    let url = Utf8ColumnScan::open(&col_dir.join("URL.col"))?;
+    let url_path = col_dir.join("URL.col");
+    let url = Utf8ColumnScan::open(&url_path)?;
+    perf.add_scan("URL", file_bytes(&url_path), url.decompressed_bytes() as u64);
     if row_count >= PARALLEL_THRESHOLD {
         mask.par_iter_mut()
             .enumerate()
@@ -206,6 +257,7 @@ fn pass2_top_details(
     mask: &[bool],
     row_count: usize,
     top: &[(u64, u64)],
+    perf: &mut Q23Perf,
 ) -> Result<Vec<Vec<String>>> {
     let mut hash_to_slot = AHashMap::with_capacity(top.len());
     for (slot, (h, _)) in top.iter().enumerate() {
@@ -215,7 +267,13 @@ fn pass2_top_details(
     let mut row_slot = vec![-1i8; row_count];
 
     // One SearchPhrase pass: map each matching row to top slot and capture phrase text once.
-    let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
+    let phrase_path = col_dir.join("SearchPhrase.col");
+    let phrase = Utf8ColumnScan::open(&phrase_path)?;
+    perf.add_scan(
+        "SearchPhrase",
+        file_bytes(&phrase_path),
+        phrase.decompressed_bytes() as u64,
+    );
     for i in 0..row_count {
         if !mask[i] {
             continue;
@@ -231,8 +289,11 @@ fn pass2_top_details(
         }
     }
     drop(phrase);
+    perf.rows_materialized = row_slot.iter().filter(|&&s| s >= 0).count();
 
-    let url = Utf8ColumnScan::open(&col_dir.join("URL.col"))?;
+    let url_path = col_dir.join("URL.col");
+    let url = Utf8ColumnScan::open(&url_path)?;
+    perf.add_scan("URL", file_bytes(&url_path), url.decompressed_bytes() as u64);
     for i in 0..row_count {
         let slot = row_slot[i];
         if slot >= 0 {
@@ -241,7 +302,9 @@ fn pass2_top_details(
     }
     drop(url);
 
-    let title = Utf8ColumnScan::open(&col_dir.join("Title.col"))?;
+    let title_path = col_dir.join("Title.col");
+    let title = Utf8ColumnScan::open(&title_path)?;
+    perf.add_scan("Title", file_bytes(&title_path), title.decompressed_bytes() as u64);
     for i in 0..row_count {
         let slot = row_slot[i];
         if slot >= 0 {
@@ -250,7 +313,9 @@ fn pass2_top_details(
     }
     drop(title);
 
-    let users = Int64ColumnScan::open(&col_dir.join("UserID.col"))?;
+    let user_path = col_dir.join("UserID.col");
+    let users = Int64ColumnScan::open(&user_path)?;
+    perf.add_scan("UserID", file_bytes(&user_path), users.decompressed_bytes() as u64);
     for i in 0..row_count {
         let slot = row_slot[i];
         if slot >= 0 {
@@ -295,21 +360,68 @@ fn q23_execute_streaming(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<Vec<String>>> {
-    let mut mask = build_q23_mask(col_dir, row_count)?;
+    let mut perf = Q23Perf {
+        rows_tested: row_count,
+        ..Q23Perf::default()
+    };
+    let t_total = Instant::now();
 
-    let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
+    let t_mask = Instant::now();
+    let mut mask = build_q23_mask(col_dir, row_count, &mut perf)?;
+    let phase_mask_ms = t_mask.elapsed().as_secs_f64() * 1000.0;
+    perf.rows_after_mask = mask.iter().filter(|&&m| m).count();
+
+    let phrase_path = col_dir.join("SearchPhrase.col");
+    let t_count = Instant::now();
+    let phrase = Utf8ColumnScan::open(&phrase_path)?;
+    perf.add_scan(
+        "SearchPhrase",
+        file_bytes(&phrase_path),
+        phrase.decompressed_bytes() as u64,
+    );
     let counts = pass1_phrase_filter_and_counts(&phrase, &mut mask, row_count);
     drop(phrase);
+    let phase_count_ms = t_count.elapsed().as_secs_f64() * 1000.0;
+    perf.rows_after_phrase = mask.iter().filter(|&&m| m).count();
 
     if counts.is_empty() {
         return Ok(Vec::new());
     }
 
+    let t_top = Instant::now();
     let top: Vec<(u64, u64)> = top_counts(
         counts.into_iter().map(|(h, c)| (c, (h, c))),
         limit,
         offset,
     );
+    let phase_top_ms = t_top.elapsed().as_secs_f64() * 1000.0;
 
-    pass2_top_details(col_dir, &mask, row_count, &top)
+    let t_pass2 = Instant::now();
+    let rows = pass2_top_details(col_dir, &mask, row_count, &top, &mut perf)?;
+    let phase_pass2_ms = t_pass2.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+    eprintln!(
+        "perf:q23 rows_tested={} rows_after_mask={} rows_after_phrase={} rows_materialized={} blocks_read={} bytes_comp={{Title:{},URL:{},SearchPhrase:{},UserID:{}}} bytes_dec={{Title:{},URL:{},SearchPhrase:{},UserID:{}}} phase_ms={{mask:{:.1},count:{:.1},topk:{:.1},pass2:{:.1},total:{:.1}}}",
+        perf.rows_tested,
+        perf.rows_after_mask,
+        perf.rows_after_phrase,
+        perf.rows_materialized,
+        perf.blocks_read,
+        perf.comp_title,
+        perf.comp_url,
+        perf.comp_phrase,
+        perf.comp_user,
+        perf.dec_title,
+        perf.dec_url,
+        perf.dec_phrase,
+        perf.dec_user,
+        phase_mask_ms,
+        phase_count_ms,
+        phase_top_ms,
+        phase_pass2_ms,
+        total_ms
+    );
+
+    Ok(rows)
 }

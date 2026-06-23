@@ -13,7 +13,7 @@
 Before more micro-tuning, prioritize structural changes that can produce order-of-magnitude gains:
 
 1. **Reliability first:** fix Q23 "silent exit" and force explicit error output in bench logs before any further perf claims.
-2. **Instrument phases:** add per-phase timings + bytes-decompressed counters for Q23/Q24 (mask, count, top-k, pass2, projection).
+2. **Instrument phases:** add per-phase timings + bytes-decompressed counters for Q23/Q24 (mask, count, top-k, pass2, projection). ✅ Implemented in core fast paths (`perf:q23`, `perf:q24` stderr lines).
 3. **Stop wide parallel decode:** avoid rayon over full-column LZ4 work; only parallelize bounded/sparse work.
 4. **Blockized read path (main lever):** add block metadata + block iterators so LIKE/filter/top-k can run block-at-a-time without full-column decompress.
 5. **Apply in order:** Q24 first (best stress case for late materialization), then Q23, then propagate pattern to Q21/Q22/Q36/Q41.

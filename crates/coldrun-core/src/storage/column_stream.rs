@@ -57,6 +57,11 @@ impl Utf8ColumnScan {
     pub fn str_at(&self, row: usize) -> &str {
         utf8_row_str(&self.body, &self.offsets, row)
     }
+
+    #[inline]
+    pub fn decompressed_bytes(&self) -> usize {
+        8 + self.body.len()
+    }
 }
 pub struct Int64ColumnScan {
     values: Vec<i64>,
@@ -85,5 +90,10 @@ impl Int64ColumnScan {
     #[inline]
     pub fn at(&self, row: usize) -> i64 {
         self.values[row]
+    }
+
+    #[inline]
+    pub fn decompressed_bytes(&self) -> usize {
+        8 + self.values.len() * size_of::<i64>()
     }
 }
