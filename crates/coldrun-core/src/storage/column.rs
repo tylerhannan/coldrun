@@ -5,14 +5,19 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use super::column_blocks::{
+    write_blocks_sidecar, BlockEncoding, ColumnBlockMeta, ColumnBlocksSidecar,
+};
 use super::pod::PodStorage;
 use super::utf8_col::{read_utf8_offsets, utf8_str_at, write_utf8_idx_sidecar, Utf8Column};
 use crate::Result;
 
 pub(crate) const MAGIC: &[u8; 4] = b"CRUN";
 pub(crate) const FORMAT_V1: u8 = 1;
+pub(crate) const FORMAT_V2: u8 = 2;
 pub(crate) const ENC_RAW: u8 = 0;
 pub(crate) const ENC_LZ4: u8 = 1;
+const DEFAULT_BLOCK_ROWS: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColumnType {
@@ -213,12 +218,42 @@ impl ColumnData {
 pub(crate) fn open_column_payload(path: &Path) -> Result<(ColumnType, Vec<u8>)> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len() as usize;
+    if len < 5 {
+        return Err(crate::Error::msg("column file too short"));
+    }
+    let mut head = [0u8; 6];
+    file.read_exact(&mut head)?;
+    if &head[0..4] != MAGIC {
+        return Err(crate::Error::msg("invalid column file magic"));
+    }
+    if head[4] == FORMAT_V2 {
+        let col_type = parse_col_type(head[5])?;
+        let reader = super::column_blocks::ColumnBlockReader::open(path)?;
+        if reader.column_type() != col_type {
+            return Err(crate::Error::msg("column type mismatch between v2 header and sidecar"));
+        }
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(reader.row_count() as u64).to_le_bytes());
+        for meta in reader.iter_blocks() {
+            let block = reader.read_block(meta.block_id)?;
+            if block.bytes.len() < 8 {
+                return Err(crate::Error::msg("column block payload truncated"));
+            }
+            let block_rows = u64::from_le_bytes(block.bytes[0..8].try_into().unwrap()) as usize;
+            if block_rows != meta.row_count {
+                return Err(crate::Error::msg("column block row_count mismatch"));
+            }
+            payload.extend_from_slice(&block.bytes[8..]);
+        }
+        return Ok((col_type, payload));
+    }
     if len > 64 * 1024 {
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         return decode_column_payload_from_bytes(&mmap);
     }
+    drop(file);
     let mut data = Vec::new();
-    file.read_to_end(&mut data)?;
+    File::open(path)?.read_to_end(&mut data)?;
     decode_column_payload_from_bytes(&data)
 }
 
@@ -354,29 +389,174 @@ pub(crate) fn write_col_payload(
     if let Some(offsets) = utf8_offsets {
         write_utf8_idx_sidecar(path, offsets)?;
     }
-    let payload = if raw.len() > 4096 {
-        lz4_flex::compress_prepend_size(raw)
-    } else {
-        raw.to_vec()
-    };
-    let encoding = if payload.len() < raw.len() {
-        ENC_LZ4
-    } else {
-        ENC_RAW
-    };
-    let body = if encoding == ENC_LZ4 {
-        &payload
-    } else {
-        raw
+    if raw.len() < 8 {
+        return Err(crate::Error::msg("column payload truncated"));
+    }
+    let row_count = u64::from_le_bytes(raw[0..8].try_into().unwrap()) as usize;
+    let body = &raw[8..];
+    write_v2_payload(path, col_type, row_count, body, utf8_offsets, DEFAULT_BLOCK_ROWS)
+}
+
+pub(crate) fn write_utf8_col_payload_from_staging(
+    path: &Path,
+    row_count: usize,
+    body_path: &Path,
+    body_len: u64,
+    offsets: &[u64],
+) -> Result<()> {
+    write_utf8_idx_sidecar(path, offsets)?;
+    let mut out = File::create(path)?;
+    out.write_all(MAGIC)?;
+    out.write_all(&[FORMAT_V2])?;
+    out.write_all(&[ColumnType::Utf8 as u8])?;
+
+    let mut sidecar = ColumnBlocksSidecar {
+        schema_version: 1,
+        column_type: ColumnType::Utf8,
+        row_count,
+        block_rows: DEFAULT_BLOCK_ROWS.max(1),
+        blocks: Vec::new(),
     };
 
-    let mut f = File::create(path)?;
-    f.write_all(MAGIC)?;
-    f.write_all(&[FORMAT_V1])?;
-    f.write_all(&[col_type as u8])?;
-    f.write_all(&[encoding])?;
-    f.write_all(body)?;
-    Ok(())
+    use std::io::{Read, Seek, SeekFrom};
+    let mut body_file = File::open(body_path)?;
+    let mut row_start = 0usize;
+    let mut file_off = 6u64;
+    while row_start < row_count {
+        let rows = (row_count - row_start).min(DEFAULT_BLOCK_ROWS);
+        let row_end = row_start + rows;
+        let start = offsets[row_start] as usize;
+        let end = if row_end < row_count {
+            offsets[row_end] as usize
+        } else {
+            body_len as usize
+        };
+        let mut block = Vec::with_capacity(8 + end.saturating_sub(start));
+        block.extend_from_slice(&(rows as u64).to_le_bytes());
+        body_file.seek(SeekFrom::Start(start as u64))?;
+        let mut body = vec![0u8; end.saturating_sub(start)];
+        body_file.read_exact(&mut body)?;
+        block.extend_from_slice(&body);
+        let (encoded, encoding) = encode_block(&block);
+        out.write_all(&encoded)?;
+        sidecar.blocks.push(ColumnBlockMeta {
+            block_id: sidecar.blocks.len(),
+            row_start,
+            row_count: rows,
+            compressed_offset: file_off,
+            compressed_len: encoded.len() as u64,
+            decompressed_len: block.len() as u64,
+            encoding,
+        });
+        file_off += encoded.len() as u64;
+        row_start = row_end;
+    }
+    write_blocks_sidecar(path, &sidecar)
+}
+
+fn write_v2_payload(
+    path: &Path,
+    col_type: ColumnType,
+    row_count: usize,
+    body: &[u8],
+    utf8_offsets: Option<&[u64]>,
+    block_rows: usize,
+) -> Result<()> {
+    let mut out = File::create(path)?;
+    out.write_all(MAGIC)?;
+    out.write_all(&[FORMAT_V2])?;
+    out.write_all(&[col_type as u8])?;
+
+    let mut sidecar = ColumnBlocksSidecar {
+        schema_version: 1,
+        column_type: col_type,
+        row_count,
+        block_rows: block_rows.max(1),
+        blocks: Vec::new(),
+    };
+
+    let mut row_start = 0usize;
+    let mut file_off = 6u64;
+    while row_start < row_count {
+        let rows = (row_count - row_start).min(block_rows.max(1));
+        let row_end = row_start + rows;
+        let block_body = block_body_slice(col_type, row_start, row_end, row_count, body, utf8_offsets)?;
+        let mut block = Vec::with_capacity(8 + block_body.len());
+        block.extend_from_slice(&(rows as u64).to_le_bytes());
+        block.extend_from_slice(block_body);
+        let (encoded, encoding) = encode_block(&block);
+        out.write_all(&encoded)?;
+        sidecar.blocks.push(ColumnBlockMeta {
+            block_id: sidecar.blocks.len(),
+            row_start,
+            row_count: rows,
+            compressed_offset: file_off,
+            compressed_len: encoded.len() as u64,
+            decompressed_len: block.len() as u64,
+            encoding,
+        });
+        file_off += encoded.len() as u64;
+        row_start = row_end;
+    }
+    write_blocks_sidecar(path, &sidecar)
+}
+
+fn encode_block(block: &[u8]) -> (Vec<u8>, BlockEncoding) {
+    if block.len() <= 4096 {
+        return (block.to_vec(), BlockEncoding::Raw);
+    }
+    let compressed = lz4_flex::compress_prepend_size(block);
+    if compressed.len() < block.len() {
+        (compressed, BlockEncoding::Lz4)
+    } else {
+        (block.to_vec(), BlockEncoding::Raw)
+    }
+}
+
+fn block_body_slice<'a>(
+    col_type: ColumnType,
+    row_start: usize,
+    row_end: usize,
+    row_count: usize,
+    body: &'a [u8],
+    utf8_offsets: Option<&[u64]>,
+) -> Result<&'a [u8]> {
+    match col_type {
+        ColumnType::Int16 => slice_fixed(body, row_start, row_end, size_of::<i16>()),
+        ColumnType::Int32 | ColumnType::Date => slice_fixed(body, row_start, row_end, size_of::<i32>()),
+        ColumnType::Int64 | ColumnType::Timestamp => {
+            slice_fixed(body, row_start, row_end, size_of::<i64>())
+        }
+        ColumnType::Utf8 => {
+            let offsets = utf8_offsets.ok_or_else(|| crate::Error::msg("utf8 offsets missing"))?;
+            if offsets.len() != row_count {
+                return Err(crate::Error::msg("utf8 offsets row count mismatch"));
+            }
+            let start = offsets[row_start] as usize;
+            let end = if row_end < row_count {
+                offsets[row_end] as usize
+            } else {
+                body.len()
+            };
+            if end < start || end > body.len() {
+                return Err(crate::Error::msg("utf8 block body bounds invalid"));
+            }
+            Ok(&body[start..end])
+        }
+    }
+}
+
+fn slice_fixed(body: &[u8], row_start: usize, row_end: usize, width: usize) -> Result<&[u8]> {
+    let start = row_start
+        .checked_mul(width)
+        .ok_or_else(|| crate::Error::msg("fixed-width block start overflow"))?;
+    let end = row_end
+        .checked_mul(width)
+        .ok_or_else(|| crate::Error::msg("fixed-width block end overflow"))?;
+    if end < start || end > body.len() {
+        return Err(crate::Error::msg("fixed-width block bounds invalid"));
+    }
+    Ok(&body[start..end])
 }
 
 fn write_pod_vec<T: Copy>(out: &mut Vec<u8>, data: &[T]) {

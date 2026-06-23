@@ -5,11 +5,8 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use super::column::{write_col_payload, ColumnData, ColumnType};
-use super::utf8_col::write_utf8_idx_sidecar;
+use super::column::{write_col_payload, write_utf8_col_payload_from_staging, ColumnData, ColumnType};
 use crate::Result;
-
-const STREAM_RAW_THRESHOLD: u64 = 256 * 1024 * 1024;
 
 pub struct StreamingColumnWriter {
     name: String,
@@ -192,11 +189,8 @@ fn finalize_utf8(
         )));
     }
     let body_len = fs::metadata(body_path)?.len();
-    let raw_len = 8 + body_len;
-    if raw_len > STREAM_RAW_THRESHOLD {
-        write_utf8_idx_sidecar(col_path, &offsets)?;
-        write_streaming_raw(col_path, ColumnType::Utf8, count, body_path, body_len)?;
-        return Ok(());
+    if body_len > 128 * 1024 * 1024 {
+        return write_utf8_col_payload_from_staging(col_path, count as usize, body_path, body_len, &offsets);
     }
     let mut body = Vec::with_capacity(body_len as usize);
     File::open(body_path)?.read_to_end(&mut body)?;
@@ -204,25 +198,4 @@ fn finalize_utf8(
     raw.extend_from_slice(&count.to_le_bytes());
     raw.extend_from_slice(&body);
     write_col_payload(col_path, ColumnType::Utf8, &raw, Some(&offsets))
-}
-
-fn write_streaming_raw(
-    col_path: &Path,
-    col_type: ColumnType,
-    count: u64,
-    body_path: &Path,
-    body_len: u64,
-) -> Result<()> {
-    use super::column::{ENC_RAW, FORMAT_V1, MAGIC};
-
-    let mut out = File::create(col_path)?;
-    out.write_all(MAGIC)?;
-    out.write_all(&[FORMAT_V1])?;
-    out.write_all(&[col_type as u8])?;
-    out.write_all(&[ENC_RAW])?;
-    out.write_all(&count.to_le_bytes())?;
-    let mut body = File::open(body_path)?;
-    std::io::copy(&mut body, &mut out)?;
-    let _ = body_len;
-    Ok(())
 }
