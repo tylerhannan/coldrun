@@ -207,85 +207,63 @@ fn pass2_top_details(
     row_count: usize,
     top: &[(u64, u64)],
 ) -> Result<Vec<Vec<String>>> {
-    let top_hashes: AHashSet<u64> = top.iter().map(|(h, _)| *h).collect();
-    let mut aggs: AHashMap<u64, Q23TopAgg> = top_hashes
-        .iter()
-        .copied()
-        .map(|h| (h, Q23TopAgg::default()))
-        .collect();
+    let mut hash_to_slot = AHashMap::with_capacity(top.len());
+    for (slot, (h, _)) in top.iter().enumerate() {
+        hash_to_slot.insert(*h, slot);
+    }
+    let mut aggs: Vec<Q23TopAgg> = (0..top.len()).map(|_| Q23TopAgg::default()).collect();
+    let mut row_slot = vec![-1i8; row_count];
 
+    // One SearchPhrase pass: map each matching row to top slot and capture phrase text once.
     let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
     for i in 0..row_count {
         if !mask[i] {
             continue;
         }
-        let s = phrase.str_at(i);
-        let h = hash_str(s);
-        if !top_hashes.contains(&h) {
+        let h = hash_str(phrase.str_at(i));
+        let Some(&slot) = hash_to_slot.get(&h) else {
             continue;
-        }
-        if let Some(agg) = aggs.get_mut(&h) {
-            if agg.phrase_text.is_none() {
-                agg.phrase_text = Some(s.to_string());
-            }
+        };
+        row_slot[i] = slot as i8;
+        let agg = &mut aggs[slot];
+        if agg.phrase_text.is_none() {
+            agg.phrase_text = Some(phrase.str_at(i).to_string());
         }
     }
     drop(phrase);
 
-    let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
     let url = Utf8ColumnScan::open(&col_dir.join("URL.col"))?;
     for i in 0..row_count {
-        if !mask[i] {
-            continue;
-        }
-        let h = hash_str(phrase.str_at(i));
-        if !top_hashes.contains(&h) {
-            continue;
-        }
-        if let Some(agg) = aggs.get_mut(&h) {
-            update_min(&mut agg.min_url, url.str_at(i));
+        let slot = row_slot[i];
+        if slot >= 0 {
+            update_min(&mut aggs[slot as usize].min_url, url.str_at(i));
         }
     }
-    drop(phrase);
     drop(url);
 
-    let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
     let title = Utf8ColumnScan::open(&col_dir.join("Title.col"))?;
     for i in 0..row_count {
-        if !mask[i] {
-            continue;
-        }
-        let h = hash_str(phrase.str_at(i));
-        if !top_hashes.contains(&h) {
-            continue;
-        }
-        if let Some(agg) = aggs.get_mut(&h) {
-            update_min(&mut agg.min_title, title.str_at(i));
+        let slot = row_slot[i];
+        if slot >= 0 {
+            update_min(&mut aggs[slot as usize].min_title, title.str_at(i));
         }
     }
-    drop(phrase);
     drop(title);
 
     let users = Int64ColumnScan::open(&col_dir.join("UserID.col"))?;
-    let phrase = Utf8ColumnScan::open(&col_dir.join("SearchPhrase.col"))?;
     for i in 0..row_count {
-        if !mask[i] {
-            continue;
-        }
-        let h = hash_str(phrase.str_at(i));
-        if !top_hashes.contains(&h) {
-            continue;
-        }
-        if let Some(agg) = aggs.get_mut(&h) {
-            agg.distinct_users.insert(users.at(i));
+        let slot = row_slot[i];
+        if slot >= 0 {
+            aggs[slot as usize].distinct_users.insert(users.at(i));
         }
     }
-    drop(phrase);
     drop(users);
 
     let mut out = Vec::with_capacity(top.len());
     for (phrase_hash, count) in top {
-        let agg = aggs.get(phrase_hash);
+        let agg = hash_to_slot
+            .get(phrase_hash)
+            .and_then(|&slot| aggs.get(slot));
         let phrase_text = agg
             .and_then(|a| a.phrase_text.as_deref())
             .unwrap_or("");
