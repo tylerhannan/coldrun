@@ -1,6 +1,5 @@
 mod column;
 pub(crate) mod column_blocks;
-pub(crate) mod column_stream;
 mod column_staging;
 mod demo;
 mod load;

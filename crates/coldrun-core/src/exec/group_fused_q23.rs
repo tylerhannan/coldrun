@@ -1,16 +1,13 @@
 //! Q23: SearchPhrase + MIN(URL) + MIN(Title) + COUNT + COUNT(DISTINCT UserID).
 //!
-//! Streams one column file at a time from disk — never loads URL+Title+SearchPhrase into the
-//! warm-serve cache (~20 GiB decoded on 100M). Seven column decompresses total: Title+URL mask,
-//! SearchPhrase filter+count, UserID, then one batched pass2 (SearchPhrase+URL+Title) for top-K.
+//! Streams per-column blocks from disk via the block-reader API — never loads URL+Title+
+//! SearchPhrase into the warm-serve cache (~20 GiB decoded on 100M).
 
-use std::path::Path;
 use std::time::Instant;
 
 use ahash::{AHashMap, AHashSet};
 
 use crate::sql::{projection_label, ParsedQuery, SelectItemKind};
-use crate::storage::column_stream::{Int64ColumnScan, Utf8ColumnScan};
 use crate::storage::Database;
 use crate::Result;
 
@@ -18,14 +15,7 @@ use super::agg_heap::top_counts;
 use super::group_fused::hash_str;
 use super::QueryResult;
 
-const PARALLEL_THRESHOLD: usize = 250_000;
-const COUNT_SHARDS: usize = 256;
-
 const Q23_COLS: &[&str] = &["URL", "Title", "SearchPhrase", "UserID"];
-
-fn file_bytes(path: &std::path::Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-}
 
 #[derive(Default)]
 struct Q23Perf {
@@ -78,12 +68,11 @@ pub fn try_fused_q23_streaming(db: &mut Database, parsed: &ParsedQuery) -> Resul
     table.drop_columns(Q23_COLS);
 
     let row_count = table.row_count() as usize;
-    let col_dir = table.path.join("columns");
     let limit = parsed.limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let offset = parsed.offset.unwrap_or(0) as usize;
     let columns: Vec<String> = parsed.select_items.iter().map(projection_label).collect();
 
-    let rows = q23_execute_streaming(&col_dir, row_count, limit, offset)?;
+    let rows = q23_execute_streaming(table, row_count, limit, offset)?;
 
     Ok(Some(QueryResult { columns, rows }))
 }
@@ -120,128 +109,74 @@ fn is_col(e: &sqlparser::ast::Expr, name: &str) -> bool {
     crate::sql::expr_column_name(e).as_deref() == Some(name)
 }
 
-fn build_q23_mask(col_dir: &Path, row_count: usize, perf: &mut Q23Perf) -> Result<Vec<bool>> {
-    use rayon::prelude::*;
+fn build_q23_mask(
+    table: &crate::storage::Table,
+    row_count: usize,
+    perf: &mut Q23Perf,
+) -> Result<Vec<bool>> {
+    let title = table.column_block_reader("Title")?;
+    let url = table.column_block_reader("URL")?;
+    if title.row_count() != url.row_count() || title.row_count() != row_count {
+        return Err(crate::Error::msg(
+            "q23 mask block readers row_count mismatch for Title/URL",
+        ));
+    }
+    if title.blocks().len() != url.blocks().len() {
+        return Err(crate::Error::msg(
+            "q23 mask block readers block count mismatch for Title/URL",
+        ));
+    }
 
-    let title_path = col_dir.join("Title.col");
-    let title = Utf8ColumnScan::open(&title_path)?;
-    perf.add_scan("Title", file_bytes(&title_path), title.decompressed_bytes() as u64);
     let mut mask = vec![false; row_count];
-    if row_count >= PARALLEL_THRESHOLD {
-        mask.par_iter_mut()
-            .enumerate()
-            .for_each(|(i, slot)| {
-                *slot = memchr::memmem::find(title.str_at(i).as_bytes(), b"Google").is_some();
-            });
-    } else {
-        for i in 0..row_count {
-            mask[i] = memchr::memmem::find(title.str_at(i).as_bytes(), b"Google").is_some();
+    for (title_meta, url_meta) in title.iter_blocks().zip(url.iter_blocks()) {
+        if title_meta.block_id != url_meta.block_id
+            || title_meta.row_start != url_meta.row_start
+            || title_meta.row_count != url_meta.row_count
+        {
+            return Err(crate::Error::msg(
+                "q23 mask block metadata mismatch for Title/URL",
+            ));
         }
+        let title_block = title.read_block(title_meta.block_id)?;
+        let url_block = url.read_block(url_meta.block_id)?;
+        perf.add_scan("Title", title_meta.compressed_len, title_block.bytes.len() as u64);
+        perf.add_scan("URL", url_meta.compressed_len, url_block.bytes.len() as u64);
+        apply_q23_mask_block(title_meta.row_start, &title_block.bytes, &url_block.bytes, &mut mask)?;
     }
-    drop(title);
-
-    let url_path = col_dir.join("URL.col");
-    let url = Utf8ColumnScan::open(&url_path)?;
-    perf.add_scan("URL", file_bytes(&url_path), url.decompressed_bytes() as u64);
-    if row_count >= PARALLEL_THRESHOLD {
-        mask.par_iter_mut()
-            .enumerate()
-            .for_each(|(i, slot)| {
-                if *slot && memchr::memmem::find(url.str_at(i).as_bytes(), b".google.").is_some() {
-                    *slot = false;
-                }
-            });
-    } else {
-        for i in 0..row_count {
-            if mask[i] && memchr::memmem::find(url.str_at(i).as_bytes(), b".google.").is_some() {
-                mask[i] = false;
-            }
-        }
-    }
-    drop(url);
 
     Ok(mask)
 }
 
 fn pass1_phrase_filter_and_counts(
-    phrase: &Utf8ColumnScan,
+    table: &crate::storage::Table,
     mask: &mut [bool],
     row_count: usize,
-) -> AHashMap<u64, u64> {
-    use rayon::prelude::*;
+    perf: &mut Q23Perf,
+) -> Result<AHashMap<u64, u64>> {
+    let phrase = table.column_block_reader("SearchPhrase")?;
+    if phrase.row_count() != row_count {
+        return Err(crate::Error::msg(
+            "q23 pass1 row_count mismatch for SearchPhrase",
+        ));
+    }
 
-    let cap = (row_count / (COUNT_SHARDS * 8)).max(4);
-    if row_count >= PARALLEL_THRESHOLD {
-        mask.par_iter_mut()
-            .enumerate()
-            .for_each(|(i, slot)| {
-                if *slot && phrase.str_at(i).is_empty() {
-                    *slot = false;
-                }
-            });
-        pass1_phrase_counts(phrase, mask, row_count)
-    } else {
-        let mut map = AHashMap::with_capacity(cap);
-        for i in 0..row_count {
-            if !mask[i] {
-                continue;
+    let mut map = AHashMap::with_capacity((row_count / 64).max(4));
+    for meta in phrase.iter_blocks() {
+        let block = phrase.read_block(meta.block_id)?;
+        perf.add_scan("SearchPhrase", meta.compressed_len, block.bytes.len() as u64);
+        for_each_utf8_row(meta.row_start, &block.bytes, |row, s| {
+            if !mask[row] {
+                return Ok(());
             }
-            let s = phrase.str_at(i);
             if s.is_empty() {
-                mask[i] = false;
-                continue;
+                mask[row] = false;
+                return Ok(());
             }
-            let h = hash_str(s);
-            *map.entry(h).or_insert(0) += 1;
-        }
-        map
+            *map.entry(hash_str(s)).or_insert(0) += 1;
+            Ok(())
+        })?;
     }
-}
-
-fn merge_phrase_counts(mut a: AHashMap<u64, u64>, b: AHashMap<u64, u64>) -> AHashMap<u64, u64> {
-    for (k, v) in b {
-        *a.entry(k).or_insert(0) += v;
-    }
-    a
-}
-
-fn pass1_phrase_counts(
-    phrase: &Utf8ColumnScan,
-    mask: &[bool],
-    row_count: usize,
-) -> AHashMap<u64, u64> {
-    use rayon::prelude::*;
-
-    let cap = (row_count / (COUNT_SHARDS * 8)).max(4);
-    if row_count >= PARALLEL_THRESHOLD {
-        let parts: Vec<AHashMap<u64, u64>> = (0..row_count)
-            .into_par_iter()
-            .fold(
-                || AHashMap::with_capacity(cap),
-                |mut map, i| {
-                    if mask[i] {
-                        let h = hash_str(phrase.str_at(i));
-                        *map.entry(h).or_insert(0) += 1;
-                    }
-                    map
-                },
-            )
-            .collect();
-        let mut merged = AHashMap::with_capacity(cap * parts.len().min(32));
-        for part in parts {
-            merged = merge_phrase_counts(merged, part);
-        }
-        merged
-    } else {
-        let mut map = AHashMap::with_capacity(cap);
-        for i in 0..row_count {
-            if mask[i] {
-                let h = hash_str(phrase.str_at(i));
-                *map.entry(h).or_insert(0) += 1;
-            }
-        }
-        map
-    }
+    Ok(map)
 }
 
 #[derive(Default)]
@@ -253,7 +188,7 @@ struct Q23TopAgg {
 }
 
 fn pass2_top_details(
-    col_dir: &Path,
+    table: &crate::storage::Table,
     mask: &[bool],
     row_count: usize,
     top: &[(u64, u64)],
@@ -264,65 +199,83 @@ fn pass2_top_details(
         hash_to_slot.insert(*h, slot);
     }
     let mut aggs: Vec<Q23TopAgg> = (0..top.len()).map(|_| Q23TopAgg::default()).collect();
-    let mut row_slot = vec![-1i8; row_count];
+    let mut row_slot = vec![-1i32; row_count];
 
     // One SearchPhrase pass: map each matching row to top slot and capture phrase text once.
-    let phrase_path = col_dir.join("SearchPhrase.col");
-    let phrase = Utf8ColumnScan::open(&phrase_path)?;
-    perf.add_scan(
-        "SearchPhrase",
-        file_bytes(&phrase_path),
-        phrase.decompressed_bytes() as u64,
-    );
-    for i in 0..row_count {
-        if !mask[i] {
-            continue;
-        }
-        let h = hash_str(phrase.str_at(i));
-        let Some(&slot) = hash_to_slot.get(&h) else {
-            continue;
-        };
-        row_slot[i] = slot as i8;
-        let agg = &mut aggs[slot];
-        if agg.phrase_text.is_none() {
-            agg.phrase_text = Some(phrase.str_at(i).to_string());
-        }
+    let phrase = table.column_block_reader("SearchPhrase")?;
+    if phrase.row_count() != row_count {
+        return Err(crate::Error::msg(
+            "q23 pass2 row_count mismatch for SearchPhrase",
+        ));
     }
-    drop(phrase);
+    for meta in phrase.iter_blocks() {
+        let block = phrase.read_block(meta.block_id)?;
+        perf.add_scan("SearchPhrase", meta.compressed_len, block.bytes.len() as u64);
+        for_each_utf8_row(meta.row_start, &block.bytes, |row, s| {
+            if !mask[row] {
+                return Ok(());
+            }
+            let h = hash_str(s);
+            let Some(&slot) = hash_to_slot.get(&h) else {
+                return Ok(());
+            };
+            row_slot[row] = slot as i32;
+            let agg = &mut aggs[slot];
+            if agg.phrase_text.is_none() {
+                agg.phrase_text = Some(s.to_string());
+            }
+            Ok(())
+        })?;
+    }
     perf.rows_materialized = row_slot.iter().filter(|&&s| s >= 0).count();
 
-    let url_path = col_dir.join("URL.col");
-    let url = Utf8ColumnScan::open(&url_path)?;
-    perf.add_scan("URL", file_bytes(&url_path), url.decompressed_bytes() as u64);
-    for i in 0..row_count {
-        let slot = row_slot[i];
-        if slot >= 0 {
-            update_min(&mut aggs[slot as usize].min_url, url.str_at(i));
-        }
+    let url = table.column_block_reader("URL")?;
+    if url.row_count() != row_count {
+        return Err(crate::Error::msg("q23 pass2 row_count mismatch for URL"));
     }
-    drop(url);
+    for meta in url.iter_blocks() {
+        let block = url.read_block(meta.block_id)?;
+        perf.add_scan("URL", meta.compressed_len, block.bytes.len() as u64);
+        for_each_utf8_row(meta.row_start, &block.bytes, |row, s| {
+            let slot = row_slot[row];
+            if slot >= 0 {
+                update_min(&mut aggs[slot as usize].min_url, s);
+            }
+            Ok(())
+        })?;
+    }
 
-    let title_path = col_dir.join("Title.col");
-    let title = Utf8ColumnScan::open(&title_path)?;
-    perf.add_scan("Title", file_bytes(&title_path), title.decompressed_bytes() as u64);
-    for i in 0..row_count {
-        let slot = row_slot[i];
-        if slot >= 0 {
-            update_min(&mut aggs[slot as usize].min_title, title.str_at(i));
-        }
+    let title = table.column_block_reader("Title")?;
+    if title.row_count() != row_count {
+        return Err(crate::Error::msg("q23 pass2 row_count mismatch for Title"));
     }
-    drop(title);
+    for meta in title.iter_blocks() {
+        let block = title.read_block(meta.block_id)?;
+        perf.add_scan("Title", meta.compressed_len, block.bytes.len() as u64);
+        for_each_utf8_row(meta.row_start, &block.bytes, |row, s| {
+            let slot = row_slot[row];
+            if slot >= 0 {
+                update_min(&mut aggs[slot as usize].min_title, s);
+            }
+            Ok(())
+        })?;
+    }
 
-    let user_path = col_dir.join("UserID.col");
-    let users = Int64ColumnScan::open(&user_path)?;
-    perf.add_scan("UserID", file_bytes(&user_path), users.decompressed_bytes() as u64);
-    for i in 0..row_count {
-        let slot = row_slot[i];
-        if slot >= 0 {
-            aggs[slot as usize].distinct_users.insert(users.at(i));
-        }
+    let users = table.column_block_reader("UserID")?;
+    if users.row_count() != row_count {
+        return Err(crate::Error::msg("q23 pass2 row_count mismatch for UserID"));
     }
-    drop(users);
+    for meta in users.iter_blocks() {
+        let block = users.read_block(meta.block_id)?;
+        perf.add_scan("UserID", meta.compressed_len, block.bytes.len() as u64);
+        for_each_i64_row(meta.row_start, &block.bytes, |row, user| {
+            let slot = row_slot[row];
+            if slot >= 0 {
+                aggs[slot as usize].distinct_users.insert(user);
+            }
+            Ok(())
+        })?;
+    }
 
     let mut out = Vec::with_capacity(top.len());
     for (phrase_hash, count) in top {
@@ -355,7 +308,7 @@ fn update_min(slot: &mut Option<String>, s: &str) {
 }
 
 fn q23_execute_streaming(
-    col_dir: &Path,
+    table: &crate::storage::Table,
     row_count: usize,
     limit: usize,
     offset: usize,
@@ -367,20 +320,12 @@ fn q23_execute_streaming(
     let t_total = Instant::now();
 
     let t_mask = Instant::now();
-    let mut mask = build_q23_mask(col_dir, row_count, &mut perf)?;
+    let mut mask = build_q23_mask(table, row_count, &mut perf)?;
     let phase_mask_ms = t_mask.elapsed().as_secs_f64() * 1000.0;
     perf.rows_after_mask = mask.iter().filter(|&&m| m).count();
 
-    let phrase_path = col_dir.join("SearchPhrase.col");
     let t_count = Instant::now();
-    let phrase = Utf8ColumnScan::open(&phrase_path)?;
-    perf.add_scan(
-        "SearchPhrase",
-        file_bytes(&phrase_path),
-        phrase.decompressed_bytes() as u64,
-    );
-    let counts = pass1_phrase_filter_and_counts(&phrase, &mut mask, row_count);
-    drop(phrase);
+    let counts = pass1_phrase_filter_and_counts(table, &mut mask, row_count, &mut perf)?;
     let phase_count_ms = t_count.elapsed().as_secs_f64() * 1000.0;
     perf.rows_after_phrase = mask.iter().filter(|&&m| m).count();
 
@@ -397,7 +342,7 @@ fn q23_execute_streaming(
     let phase_top_ms = t_top.elapsed().as_secs_f64() * 1000.0;
 
     let t_pass2 = Instant::now();
-    let rows = pass2_top_details(col_dir, &mask, row_count, &top, &mut perf)?;
+    let rows = pass2_top_details(table, &mask, row_count, &top, &mut perf)?;
     let phase_pass2_ms = t_pass2.elapsed().as_secs_f64() * 1000.0;
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
 
@@ -424,4 +369,88 @@ fn q23_execute_streaming(
     );
 
     Ok(rows)
+}
+
+fn apply_q23_mask_block(
+    row_start: usize,
+    title_payload: &[u8],
+    url_payload: &[u8],
+    mask: &mut [bool],
+) -> Result<()> {
+    if title_payload.len() < 8 || url_payload.len() < 8 {
+        return Err(crate::Error::msg("q23 mask block payload truncated"));
+    }
+    let title_rows = u64::from_le_bytes(title_payload[0..8].try_into().unwrap()) as usize;
+    let url_rows = u64::from_le_bytes(url_payload[0..8].try_into().unwrap()) as usize;
+    if title_rows != url_rows {
+        return Err(crate::Error::msg(
+            "q23 mask block row_count mismatch between Title and URL",
+        ));
+    }
+    let mut tpos = 8usize;
+    let mut upos = 8usize;
+    for local in 0..title_rows {
+        let title = utf8_at(title_payload, &mut tpos)?;
+        let url = utf8_at(url_payload, &mut upos)?;
+        let row = row_start + local;
+        mask[row] = memchr::memmem::find(title.as_bytes(), b"Google").is_some()
+            && memchr::memmem::find(url.as_bytes(), b".google.").is_none();
+    }
+    Ok(())
+}
+
+fn for_each_utf8_row<F>(row_start: usize, payload: &[u8], mut f: F) -> Result<()>
+where
+    F: FnMut(usize, &str) -> Result<()>,
+{
+    if payload.len() < 8 {
+        return Err(crate::Error::msg("q23 utf8 block payload truncated"));
+    }
+    let rows = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+    let mut pos = 8usize;
+    for local in 0..rows {
+        let s = utf8_at(payload, &mut pos)?;
+        f(row_start + local, s)?;
+    }
+    Ok(())
+}
+
+fn for_each_i64_row<F>(row_start: usize, payload: &[u8], mut f: F) -> Result<()>
+where
+    F: FnMut(usize, i64) -> Result<()>,
+{
+    if payload.len() < 8 {
+        return Err(crate::Error::msg("q23 i64 block payload truncated"));
+    }
+    let rows = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+    let body = &payload[8..];
+    let bytes = rows * std::mem::size_of::<i64>();
+    if body.len() < bytes {
+        return Err(crate::Error::msg("q23 i64 block payload truncated"));
+    }
+    for local in 0..rows {
+        let off = local * std::mem::size_of::<i64>();
+        let v = unsafe {
+            std::ptr::read_unaligned(
+                body[off..off + std::mem::size_of::<i64>()].as_ptr() as *const i64,
+            )
+        };
+        f(row_start + local, v)?;
+    }
+    Ok(())
+}
+
+fn utf8_at<'a>(payload: &'a [u8], pos: &mut usize) -> Result<&'a str> {
+    if *pos + 4 > payload.len() {
+        return Err(crate::Error::msg("q23 utf8 payload truncated"));
+    }
+    let len = u32::from_le_bytes(payload[*pos..*pos + 4].try_into().unwrap()) as usize;
+    let start = *pos + 4;
+    let end = start + len;
+    if end > payload.len() {
+        return Err(crate::Error::msg("q23 utf8 payload truncated"));
+    }
+    *pos = end;
+    std::str::from_utf8(&payload[start..end])
+        .map_err(|e| crate::Error::msg(format!("invalid utf8 in q23 block payload: {e}")))
 }
