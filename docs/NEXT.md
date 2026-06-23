@@ -21,6 +21,31 @@ Before more micro-tuning, prioritize structural changes that can produce order-o
 
 Target trajectory: Q23/Q24 **<120s** first milestone, then **<60s**, then tail-sum reduction before Combined submission.
 
+### Non-negotiable directives (owner: this project)
+
+1. **Build a blockized column read path (highest leverage).**
+   - Add V2 on-disk metadata/sidecar with fixed-size row blocks (target 64k rows).
+   - Track per-block compressed boundaries and expose cheap `read_block(block_id)` / `iter_blocks()`.
+   - Keep V1 fallback compatibility for existing `.col` files.
+   - Goal: never decompress full 100M columns when only a subset of blocks is needed.
+
+2. **Rewrite Q24 and Q23 to consume block readers.**
+   - Q24: URL LIKE scan block-by-block, maintain top-k row ids by EventTime, late-materialize final rows/cols.
+   - Q23: block mask + block phrase count + block batched pass2; avoid full-column scans on sparse masks.
+   - Expected impact: move from ~200s class toward tens of seconds.
+
+3. **Add phase-level perf accounting (must-have).**
+   - For Q23/Q24 log: bytes decompressed per column, blocks read, rows tested, rows materialized, phase timings.
+   - This is required before trusting isolated benchmark deltas.
+
+4. **Apply same blockized pattern to Q21/Q22/Q36/Q41.**
+   - These are string-heavy and decode-bound; reuse the same infra after Q23/Q24.
+
+5. **Tighten benchmarking protocol.**
+   - Canonical numbers come only from full warm runs + committed snapshots.
+   - Isolated single-query runs are diagnostic only.
+   - Run same-VM ClickHouse compare (`P6.1`) once warm runs stabilize.
+
 ---
 
 ## P0 — Hygiene (do first)
