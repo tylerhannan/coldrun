@@ -75,18 +75,28 @@ fn is_q36_shape(parsed: &ParsedQuery) -> bool {
     if parsed.group_by.len() != 4 {
         return false;
     }
-    if !parsed.select_items.iter().all(|p| {
-        matches!(
-            p.kind,
-            SelectItemKind::CountAll | SelectItemKind::Count(_) | SelectItemKind::Column(_)
-        )
-    }) {
+    if !parsed
+        .select_items
+        .iter()
+        .all(|p| is_q36_projection(&p.kind, parsed))
+    {
         return false;
     }
     parsed.group_by.iter().all(|e| {
         let r = resolve_group_expr(e, &parsed.select_items);
         is_clientip_minus(&r)
     })
+}
+
+fn is_q36_projection(kind: &SelectItemKind, parsed: &ParsedQuery) -> bool {
+    match kind {
+        SelectItemKind::CountAll | SelectItemKind::Count(_) => true,
+        SelectItemKind::Column(expr) | SelectItemKind::Other(expr) => {
+            let resolved = resolve_group_expr(expr, &parsed.select_items);
+            is_clientip_minus(&resolved)
+        }
+        _ => false,
+    }
 }
 
 fn is_clientip_minus(expr: &Expr) -> bool {
