@@ -29,20 +29,20 @@ Complete warm-serve run on AWS `c6a.4xlarge` (32 GiB), `/data/coldrun` ~100M row
 
 | Metric | Coldrun (hot) | ClickHouse (official hot) |
 |--------|---------------|---------------------------|
-| **Q1–22 sum** | **46.0s** | ~9.6s |
-| **Q24–43 sum** | **401.1s** | ~22.8s |
-| **42 queries** (bench; Q23 skipped) | **447.1s** | **~32.4s** |
-| **All 43** | **669.4s** | **~32.4s** |
+| **Q1–22 sum** | **45.69s** | ~9.6s |
+| **Q24–43 sum** | **186.79s** | ~22.8s |
+| **42 queries** (bench; Q23 skipped) | **232.48s** | **~32.4s** |
+| **All 43** | **321.843s** | **~32.4s** |
 
-**Commit:** `eb414c9` · **Log:** `/data/bench-warm-full.log`
+**Commit:** `80c09f0` · **Log:** `/data/bench-v2-warm-full.log`
 
 | Query | CR | CH | Notes |
 |-------|-----|-----|-------|
 | Q14 | 9.2s | 0.75s | sort distinct still ~12× |
 | Q17–19 | 3.2s / 1.2s / 3.4s | 1.6s / 0.94s / 2.7s | sort agg (was 12s / 21s / 27s pre-fix) |
 | Q21–22 | 4.5s / 4.9s | 0.31s / 0.09s | string GROUP BY |
-| Q23 | 222s | 0.61s | disk streaming (`group_fused_q23.rs`); formal 3-try @ `dde9184` |
-| Q24 | 231s | 0.10s | disk top-K + sequential `project_rows` (`scan_stream.rs`) |
+| Q23 | 56.2s | 0.61s | block-reader + V2 writer path (full warm @ `80c09f0`) |
+| Q24 | 50.0s | 0.10s | block-reader + V2 writer path (full warm @ `80c09f0`) |
 | Q25 | 0.008s | 0.038s | **CR wins** |
 | Q29 | 7.9s | 9.6s | **CR wins** |
 | Q33–35 | ~15–17s | ~3–4s | multi-column GROUP BY |
@@ -51,22 +51,23 @@ Complete warm-serve run on AWS `c6a.4xlarge` (32 GiB), `/data/coldrun` ~100M row
 
 Runbook: [`CLOUD-RUN.md`](CLOUD-RUN.md).
 
-Q23 formal bench (Jun 2026): hot **222.341s** — tries [238.8, 229.9, 222.3] @ `dde9184`, log `/data/bench-q23-fix3.log`.
+Q23 formal pre-V2 bench (Jun 2026): hot **222.341s** — tries [238.8, 229.9, 222.3] @ `dde9184`, log `/data/bench-q23-fix3.log`.
 
-### V2 blockized rerun (targeted Q23/Q24, Jun 2026)
+### V2 blockized reruns (Jun 2026)
 
-After landing block-reader wiring + V2 writer (`c107ad4`), we reloaded 100M rows on the same VM and ran a targeted warm bench for Q23/Q24 only:
+After landing block-reader wiring + V2 writer, we reloaded 100M rows on the same VM and ran both targeted and full warm benches:
 
 - **Load log:** `/data/load-v2.log` (`EXIT:0`, 27 `.col` + 27 `.blocks.json`)
-- **Bench log:** `/data/bench-v2-q23q24.log` (`./scripts/bench-serve.sh 100000000 --skip-load --from 23 --to 24 --no-compare`)
-- **Data size:** `14176147746` bytes reported by bench run (`~14.2 GB`)
+- **Targeted bench log:** `/data/bench-v2-q23q24.log` (`c107ad4`)
+- **Full warm bench log:** `/data/bench-v2-warm-full.log` (`80c09f0`)
+- **Data size:** `14176149601` bytes reported by full warm bench (`~14.2 GB`)
 
-| Query | Pre-V2 hot | V2 hot (`c107ad4`) | Delta |
-|-------|------------|--------------------|-------|
-| Q23 | 222.341s | **54.501s** | **-167.840s (~4.1x faster)** |
-| Q24 | 231.3s | **48.673s** | **-182.627s (~4.8x faster)** |
+| Query | Pre-V2 hot | V2 targeted (`c107ad4`) | V2 full warm (`80c09f0`) |
+|-------|------------|--------------------------|--------------------------|
+| Q23 | 222.341s | **54.501s** | **56.151s** |
+| Q24 | 231.3s | **48.673s** | **49.990s** |
 
-Targeted hot sum (Q23+Q24): **103.174s** (was ~453.6s).
+Full all-43 hot sum moved from **669.4s** to **321.843s**.
 
 ## Sort-based aggregation (`agg_sort.rs`, Jun 2026)
 

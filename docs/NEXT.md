@@ -1,8 +1,8 @@
 # Next steps (prioritized)
 
-**Baseline:** warm-serve 100M on `c6a.4xlarge` @ [`eb414c9`](https://github.com/tylerhannan/coldrun/commit/eb414c9) — see [`benchmarks/cloud-100m/`](benchmarks/cloud-100m/) and [`PERF.md`](PERF.md).
+**Baseline:** warm-serve 100M on `c6a.4xlarge` @ [`80c09f0`](https://github.com/tylerhannan/coldrun/commit/80c09f0) — see [`benchmarks/cloud-100m/`](benchmarks/cloud-100m/) and [`PERF.md`](PERF.md).
 
-**Goal:** shrink the **~674s** hot sum (all 43) toward ClickHouse **~32s**, without regressing 1M correctness (**43/43** vs CH) or warm-serve stability on 32 GiB.
+**Goal:** shrink the **321.843s** hot sum (all 43) toward ClickHouse **~32s**, without regressing 1M correctness (**43/43** vs CH) or warm-serve stability on 32 GiB.
 
 **How to bench:** tiered workflow in [`benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md#iteration-tiers-when-to-use-100m) — most iterations on laptop 1M; 100M VM only for scale-sensitive milestones (tmux required on cloud).
 
@@ -68,10 +68,10 @@ Full-column utf8 decode on 100M rows dominates. Same fix class: **scan compresse
 
 | # | Query | CR hot | CH hot | Work | Code |
 |---|-------|--------|--------|------|------|
-| 1.1 | **Q24** | **48.673s** | 0.10s | V2 targeted rerun @ `c107ad4` (3 tries: [51.454, 48.749, 48.673]); next: confirm in full warm 43-query snapshot | [`scan_stream.rs`](../crates/coldrun-core/src/exec/scan_stream.rs), [`table.rs`](../crates/coldrun-core/src/storage/table.rs) |
-| 1.2 | **Q23** | **54.501s** | 0.61s | V2 targeted rerun @ `c107ad4` (3 tries: [54.583, 54.501, 54.549]); next: confirm in full warm 43-query snapshot | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
+| 1.1 | **Q24** | **49.990s** | 0.10s | Confirmed in full warm 43-query rerun @ `80c09f0` (tries [84.866, 50.050, 49.990]) | [`scan_stream.rs`](../crates/coldrun-core/src/exec/scan_stream.rs), [`table.rs`](../crates/coldrun-core/src/storage/table.rs) |
+| 1.2 | **Q23** | **56.151s** | 0.61s | Confirmed in full warm 43-query rerun @ `80c09f0` (tries [56.839, 56.151, 56.275]) | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
 
-**Success target:** each ≪ **60s** on warm serve (stretch: ≪ **10s**). ✅ Reached on targeted V2 rerun; pending full 43-query confirmation.
+**Success target:** each ≪ **60s** on warm serve (stretch: ≪ **10s**). ✅ Reached and confirmed in full 43-query warm rerun.
 
 ### P1 milestone update — V2 targeted rerun (`c107ad4`)
 
@@ -83,6 +83,17 @@ Full-column utf8 decode on 100M rows dominates. Same fix class: **scan compresse
 | **Combined (Q23+Q24)** | **103.174s** hot |
 | **Load/data context** | Reload @ `c107ad4` completed (`/data/load-v2.log`, `EXIT:0`), 27 `.col` + 27 `.blocks.json`, bench-reported size `14176147746` bytes |
 | **Log** | `/data/bench-v2-q23q24.log` |
+
+### P1 confirmation — full warm rerun (`80c09f0`)
+
+| Item | Result |
+|------|--------|
+| **Bench command** | `./scripts/bench-serve.sh 100000000 --skip-load --write-snapshot` |
+| **Q23 hot** | **56.151s** (tries [56.839, 56.151, 56.275]) |
+| **Q24 hot** | **49.990s** (tries [84.866, 50.050, 49.990]) |
+| **All-43 hot sum** | **321.843s** (was 669.4s pre-V2) |
+| **Load/data context** | Reload completed (`/data/load-v2.log`, `EXIT:0`), bench-reported size `14176149601` bytes |
+| **Log** | `/data/bench-v2-warm-full.log` |
 
 Detail: [`perf/q-23.md`](perf/q-23.md), [`perf/q-24.md`](perf/q-24.md).
 
@@ -110,7 +121,7 @@ Detail: [`perf/q-23.md`](perf/q-23.md), [`perf/q-24.md`](perf/q-24.md).
 
 ## P2 — High ratio, large Δ (tail Q25–43)
 
-Excluding Q23/Q24, Q25–43 sum is **~170s** vs CH **~23s**.
+Excluding Q23/Q24, Q25–43 sum is **168.958s** vs CH **~23s**.
 
 | # | Query | CR hot | CH hot | Work | Code |
 |---|-------|--------|--------|------|------|

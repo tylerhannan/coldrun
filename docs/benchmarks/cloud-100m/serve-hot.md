@@ -1,80 +1,66 @@
 # Serve hot — 100M rows (c6a.4xlarge)
 
-**VM:** AWS `c6a.4xlarge` (32 GiB), `/data/coldrun` (~100M rows, ~33 GiB on disk)  
-**Command:** `./scripts/bench-serve.sh 100000000 --skip-load` (Q1–22 + Q24–43); Q23 formal 3-try @ `dde9184` separate  
+**VM:** AWS `c6a.4xlarge` (32 GiB), `/data/coldrun` (~100M rows, V2 blockized reload)  
+**Command:** `./scripts/bench-serve.sh 100000000 --skip-load --write-snapshot`  
 **Protocol:** warm `serve`, 3 tries/query, hot = min(try 2, try 3)  
-**Commit:** `eb414c9` (Q24 streaming + sequential `project_rows`); Q23 formal @ `dde9184`  
-**Log:** `/data/bench-warm-full.log` (Q1–22, Q24–43); `/data/bench-q23-fix3.log` (Q23)
+**Commit:** `80c09f0`  
+**Log:** `/data/bench-v2-warm-full.log`
 
 | Q | hot (s) | Notes |
 |---|---------|-------|
 | 1 | 0.000 | |
 | 2 | 0.000 | |
 | 3 | 0.232 | |
-| 4 | 0.149 | |
-| 5 | 2.742 | |
-| 6 | 1.096 | |
-| 7 | 0.281 | |
-| 8 | 0.244 | |
-| 9 | 1.866 | |
-| 10 | 4.397 | |
-| 11 | 0.727 | |
-| 12 | 0.758 | |
-| 13 | 3.212 | |
-| 14 | 9.198 | |
-| 15 | 0.775 | |
-| 16 | 3.118 | |
-| 17 | 3.185 | |
-| 18 | 1.195 | |
-| 19 | 3.409 | |
-| 20 | 0.062 | |
-| 21 | 4.467 | |
-| 22 | 4.907 | |
-| 23 | 222.341 | formal 3-try @ `dde9184` — tries [238.8, 229.9, 222.3] |
-| 24 | 231.3 | |
-| 25 | 0.008 | |
-| 26 | 0.274 | |
-| 27 | 0.641 | |
+| 4 | 0.148 | |
+| 5 | 2.727 | |
+| 6 | 1.136 | |
+| 7 | 0.282 | |
+| 8 | 0.260 | |
+| 9 | 1.910 | |
+| 10 | 4.363 | |
+| 11 | 0.749 | |
+| 12 | 0.792 | |
+| 13 | 3.354 | |
+| 14 | 9.352 | |
+| 15 | 0.812 | |
+| 16 | 3.112 | |
+| 17 | 3.205 | |
+| 18 | 1.178 | |
+| 19 | 3.478 | |
+| 20 | 0.053 | |
+| 21 | 4.517 | |
+| 22 | 5.084 | |
+| 23 | 56.151 | tries [56.839, 56.151, 56.275] |
+| 24 | 49.990 | tries [84.866, 50.050, 49.990] |
+| 25 | 0.007 | |
+| 26 | 0.277 | |
+| 27 | 0.657 | |
 | 28 | 1.775 | |
-| 29 | 7.909 | |
-| 30 | 0.967 | |
-| 31 | 2.559 | |
-| 32 | 2.827 | |
-| 33 | 17.221 | |
-| 34 | 14.921 | |
-| 35 | 14.936 | |
-| 36 | 83.271 | |
-| 37 | 3.837 | |
-| 38 | 3.967 | |
-| 39 | 3.101 | |
-| 40 | 1.203 | |
-| 41 | 7.496 | |
-| 42 | 1.610 | |
-| 43 | 1.312 | |
+| 29 | 7.953 | |
+| 30 | 0.972 | |
+| 31 | 2.594 | |
+| 32 | 2.790 | |
+| 33 | 17.108 | |
+| 34 | 14.839 | |
+| 35 | 14.769 | |
+| 36 | 82.782 | |
+| 37 | 3.790 | |
+| 38 | 3.953 | |
+| 39 | 3.026 | |
+| 40 | 1.197 | |
+| 41 | 7.536 | |
+| 42 | 1.627 | |
+| 43 | 1.306 | |
 
 **Hot sums**
 
 | Scope | Coldrun | ClickHouse ([c6a.4xlarge](https://github.com/ClickHouse/ClickBench/blob/main/clickhouse/results/20260516/c6a.4xlarge.json)) |
 |-------|---------|----------------------------------------------------------------------------------------------------------------------------------|
-| Q1–22 | 46.0s | ~9.6s |
-| Q24–43 | 401.1s | ~22.8s |
-| Q1–22 + Q24–43 (42 queries) | **447.1s** | **~32.4s** |
-| All 43 | **669.4s** | **~32.4s** |
+| Q1–22 | 45.69s | ~9.6s |
+| Q24–43 | 186.79s | ~22.8s |
+| Q1–22 + Q24–43 (42 queries) | **232.48s** | **~32.4s** |
+| All 43 | **321.843s** | **~32.4s** |
 
 Not ClickBench Combined (no cold protocol, no `drop_caches` per query). See [`compare-hot.md`](compare-hot.md).
 
-## V2 targeted rerun (Q23–Q24 only, Jun 2026)
-
-Targeted post-V2 run (not a full 43-query replacement snapshot yet):
-
-- **Commit:** `c107ad4`
-- **Load context:** `/data/load-v2.log` (`EXIT:0`, 27 `.col`, 27 `.blocks.json`)
-- **Bench command:** `./scripts/bench-serve.sh 100000000 --skip-load --from 23 --to 24 --no-compare`
-- **Bench log:** `/data/bench-v2-q23q24.log`
-
-| Q | tries (s) | hot (s) |
-|---|-----------|---------|
-| 23 | [54.583, 54.501, 54.549] | **54.501** |
-| 24 | [51.454, 48.749, 48.673] | **48.673** |
-
-Targeted hot sum (Q23+Q24): **103.174s**.
+Targeted Q23/Q24-only rerun at `c107ad4` remains useful as an earlier diagnostic check, but this full 43-query run is now the canonical warm snapshot.
