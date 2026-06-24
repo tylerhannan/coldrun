@@ -1,6 +1,9 @@
 //! Column-chunk fused filter + COUNT GROUP BY (no bool mask, raw slice scans).
 
-use ahash::AHashMap;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
+use ahash::{AHashMap, AHashSet};
 
 use super::agg_heap::top_counts_u128_key;
 use super::column_slice::{self, IntCols};
@@ -9,6 +12,7 @@ use super::simd_scan::for_each_q41_zone_match;
 
 const CHUNK: usize = 8192;
 const Q41_PARALLEL_THRESHOLD: usize = 250_000;
+const Q36_HASH_THRESHOLD: usize = 1_000_000;
 const COUNT_SHARDS: usize = 256;
 
 #[inline(always)]
@@ -94,11 +98,102 @@ fn topk_from_shards(shards: ShardMaps, limit: usize, offset: usize) -> Vec<(u128
 
 /// Q36: sort ClientIP + run-length counts — no multi-million-entry hash map.
 pub fn clientip_quad_topk(ips: &[i32], limit: usize, offset: usize) -> Vec<(u128, u64)> {
+    if ips.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+
+    // Q36 can be either high-duplicate or near-unique depending on data.
+    // Use hash counting only when a small sample suggests enough reuse.
+    if ips.len() >= Q36_HASH_THRESHOLD && estimated_unique_ratio(ips) <= 0.90 {
+        let top = clientip_topk_hash(ips, limit, offset);
+        if !top.is_empty() {
+            return top
+                .into_iter()
+                .map(|(ip, c)| (pack_clientip_quad(ip), c))
+                .collect();
+        }
+    }
+
     use super::agg_sort::sorted_topk_i32;
     sorted_topk_i32(ips, limit, offset)
         .into_iter()
         .map(|(ip, c)| (pack_clientip_quad(ip as i32), c))
         .collect()
+}
+
+fn estimated_unique_ratio(ips: &[i32]) -> f64 {
+    let sample_target = 65_536usize.min(ips.len());
+    if sample_target == 0 {
+        return 1.0;
+    }
+    let step = (ips.len() / sample_target).max(1);
+    let mut seen = AHashSet::with_capacity(sample_target);
+    let mut sampled = 0usize;
+    for &ip in ips.iter().step_by(step).take(sample_target) {
+        seen.insert(ip);
+        sampled += 1;
+    }
+    if sampled == 0 {
+        1.0
+    } else {
+        seen.len() as f64 / sampled as f64
+    }
+}
+
+fn clientip_topk_hash(ips: &[i32], limit: usize, offset: usize) -> Vec<(i32, u64)> {
+    use rayon::prelude::*;
+
+    let need = limit.saturating_add(offset);
+    if need == 0 {
+        return Vec::new();
+    }
+
+    let mut counts = ips
+        .par_chunks(CHUNK * 16)
+        .fold(
+            || AHashMap::<i32, u64>::with_capacity(4096),
+            |mut local, chunk| {
+                for &ip in chunk {
+                    *local.entry(ip).or_insert(0) += 1;
+                }
+                local
+            },
+        )
+        .reduce(AHashMap::new, |mut a, mut b| {
+            if a.len() < b.len() {
+                std::mem::swap(&mut a, &mut b);
+            }
+            for (k, v) in b.drain() {
+                *a.entry(k).or_insert(0) += v;
+            }
+            a
+        });
+
+    if counts.is_empty() {
+        return Vec::new();
+    }
+
+    // ORDER BY count DESC, ClientIP ASC.
+    let mut heap: BinaryHeap<Reverse<(u64, Reverse<i32>)>> = BinaryHeap::new();
+    for (ip, count) in counts.drain() {
+        let entry = (count, Reverse(ip));
+        if heap.len() < need {
+            heap.push(Reverse(entry));
+        } else if let Some(Reverse(worst)) = heap.peek() {
+            if entry.cmp(worst).is_gt() {
+                heap.push(Reverse(entry));
+                if heap.len() > need {
+                    heap.pop();
+                }
+            }
+        }
+    }
+    let mut out: Vec<(i32, u64)> = heap
+        .into_iter()
+        .map(|Reverse((c, rip))| (rip.0, c))
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out.into_iter().skip(offset).take(limit).collect()
 }
 
 #[inline(always)]

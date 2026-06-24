@@ -19,7 +19,7 @@ Coldrun is the database under test. It does not run ClickBench for other systems
 | 1. Architecture doc | Done | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | 2. MVP: load `hits`, queries 1–5 | Done | demo + Parquet (dynamic schema) |
 | 3. All 43 queries correct | Done | Demo smoke + **43/43 vs ClickHouse** on 1M Parquet ([`validation-1m.md`](docs/benchmarks/parquet/validation-1m.md)) |
-| 4. Optimize Combined score | In progress | 1M hot **0.84s** (0.62× CH); 100M warm **~681s** vs CH **~32s** @ `eb414c9` — see [`docs/benchmarks/cloud-100m/`](docs/benchmarks/cloud-100m/) · next: [`docs/NEXT.md`](docs/NEXT.md) |
+| 4. Optimize Combined score | In progress | 1M hot **0.84s** (0.62× CH); 100M warm **321.843s** vs CH **~32s** @ `80c09f0` — see [`docs/benchmarks/cloud-100m/`](docs/benchmarks/cloud-100m/) · next: [`docs/NEXT.md`](docs/NEXT.md) |
 | 5. ClickBench PR | Not started | [`clickbench/coldrun/`](clickbench/coldrun/) — after [`docs/NEXT.md`](docs/NEXT.md) P1 + official `benchmark.sh` |
 
 ## Prerequisites
@@ -110,12 +110,12 @@ Current perf VM — data already loaded; use for unattended warm + official runs
 | Item | Value |
 |------|--------|
 | **Instance** | `c6a.4xlarge` (16 vCPU, 32 GiB), Ubuntu 24.04 |
-| **SSH** | `ssh -i ~/Downloads/coldrun-bench.pem ubuntu@34.244.176.182` |
+| **SSH** | `ssh -i ~/Downloads/coldrun-bench.pem ubuntu@52.17.231.129` |
 | **Repo** | `~/coldrun` — pull `main`, build with `cargo build --release -p coldrun-cli` |
 | **Parquet** | `/data/hits.parquet` (~14 GiB) |
-| **Coldrun data** | `COLDRUN_DATA=/data/coldrun` — 99,997,497 rows, **27** `.col` files, **~33 GiB** |
+| **Coldrun data** | `COLDRUN_DATA=/data/coldrun` — 99,997,497 rows, **27** `.col` + **27** `.blocks.json`, **~14.2 GiB** |
 | **ClickHouse** | `./scripts/install-clickhouse-local.sh` (already installed on dev box) |
-| **Query fixes** | `18d7641` — sort-based top-K + Q23 two-phase (see [`docs/PERF.md`](docs/PERF.md)) |
+| **Current warm baseline** | `80c09f0` — all-43 hot **321.843s** (Q23 **56.151s**, Q24 **49.990s**) |
 
 Full checklist + unattended commands: [`docs/CLOUD-RUN.md`](docs/CLOUD-RUN.md)
 
@@ -125,8 +125,9 @@ Full checklist + unattended commands: [`docs/CLOUD-RUN.md`](docs/CLOUD-RUN.md)
 cd ~/coldrun && git pull && cargo build --release -p coldrun-cli
 export COLDRUN_ROOT=~/coldrun COLDRUN_DATA=/data/coldrun HITS_PARQUET=/data/hits.parquet
 
-# expect 27 columns, ~33G
+# expect 27 columns, plus 27 block sidecars, ~14.2G
 ls /data/coldrun/hits/columns/*.col | wc -l
+ls /data/coldrun/hits/columns/*.blocks.json | wc -l
 du -sh /data/coldrun
 
 # quick warm smoke (Q1)
@@ -159,7 +160,7 @@ tmux new-session -d -s official \
 Monitor from your laptop:
 
 ```bash
-ssh -i ~/Downloads/coldrun-bench.pem ubuntu@34.244.176.182 'tmux ls; tail -3 /data/bench-warm-coldrun.log'
+ssh -i ~/Downloads/coldrun-bench.pem ubuntu@52.17.231.129 'tmux ls; tail -3 /data/bench-warm-coldrun.log'
 ```
 
 Artifacts when done: `logs/benchmarks/serve-last.log`, `clickbench/coldrun/result.csv`, `clickbench/coldrun/clickhouse-result.csv`, `/data/bench-*.log`.
@@ -168,7 +169,8 @@ Artifacts when done: `logs/benchmarks/serve-last.log`, `clickbench/coldrun/resul
 
 **Done on laptop:** demo + 1M Parquet **43/43** vs ClickHouse; warm-serve hot sum **0.84s** vs CH **1.34s** (**0.62×**) — [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md).
 
-**Done on cloud:** 100M load; loader fixes (streaming staging, u64 UTF8 offsets). **In flight:** warm bench Q23–43 (`rebench-tail` tmux), then ClickHouse compare + official `benchmark.sh` for Combined score + ClickBench PR.
+**Done on cloud:** full warm all-43 snapshot @ `80c09f0` (hot **321.843s**), with V2 blockized gains confirmed for Q23/Q24.  
+**In flight:** P2 outliers (Q36, Q41, Q33–35), then same-VM ClickHouse compare + official `benchmark.sh` for Combined + ClickBench PR.
 
 Snapshots: [`serve-hot.md`](docs/benchmarks/demo-100k/serve-hot.md) (demo) · [`compare-hot.md`](docs/benchmarks/parquet-hits-1m/compare-hot.md) (1M Parquet) · per-query notes [`docs/perf/`](docs/perf/)
 

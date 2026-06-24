@@ -125,7 +125,7 @@ Excluding Q23/Q24, Q25–43 sum is **168.958s** vs CH **~23s**.
 
 | # | Query | CR hot | CH hot | Work | Code |
 |---|-------|--------|--------|------|------|
-| 2.1 | **Q36** | 83s | 0.25s | Fused `REGEXP_REPLACE(Referer, …)` host extract on stream; avoid materializing full Referer | [`group_columnar.rs`](../crates/coldrun-core/src/exec/group_columnar.rs), [`q-36.md`](perf/q-36.md) |
+| 2.1 | **Q36** | 83s | 0.25s | Adaptive `ClientIP` top-k path landed (sample-guided hash count + sort fallback); VM formal bench pending | [`group_columnar.rs`](../crates/coldrun-core/src/exec/group_columnar.rs), [`q-36.md`](perf/q-36.md) |
 | 2.2 | **Q41** | 7.5s | 0.013s | Tighten zone + sort path; single-pass 5-col dashboard GROUP BY without repeated string decode | [`group_columnar.rs`](../crates/coldrun-core/src/exec/group_columnar.rs), [`q-41.md`](perf/q-41.md) |
 | 2.3 | **Q33–35** | ~15–17s | ~3s | Multi-column utf8/int GROUP BY — extend columnar shard pattern from Q31–32 | [`group_fused.rs`](../crates/coldrun-core/src/exec/group_fused.rs), [`column_slice.rs`](../crates/coldrun-core/src/storage/column_slice.rs) |
 
