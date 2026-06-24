@@ -110,7 +110,7 @@ Current perf VM — data already loaded; use for unattended warm + official runs
 | Item | Value |
 |------|--------|
 | **Instance** | `c6a.4xlarge` (16 vCPU, 32 GiB), Ubuntu 24.04 |
-| **SSH** | `ssh -i ~/Downloads/coldrun-bench.pem ubuntu@52.17.231.129` |
+| **SSH** | `ssh -i ~/Downloads/coldrun-bench.pem ubuntu@<myIP>` |
 | **Repo** | `~/coldrun` — pull `main`, build with `cargo build --release -p coldrun-cli` |
 | **Parquet** | `/data/hits.parquet` (~14 GiB) |
 | **Coldrun data** | `COLDRUN_DATA=/data/coldrun` — 99,997,497 rows, **27** `.col` + **27** `.blocks.json`, **~14.2 GiB** |
@@ -160,7 +160,7 @@ tmux new-session -d -s official \
 Monitor from your laptop:
 
 ```bash
-ssh -i ~/Downloads/coldrun-bench.pem ubuntu@52.17.231.129 'tmux ls; tail -3 /data/bench-warm-coldrun.log'
+ssh -i ~/Downloads/coldrun-bench.pem ubuntu@<myIP> 'tmux ls; tail -3 /data/bench-warm-coldrun.log'
 ```
 
 Artifacts when done: `logs/benchmarks/serve-last.log`, `clickbench/coldrun/result.csv`, `clickbench/coldrun/clickhouse-result.csv`, `/data/bench-*.log`.
