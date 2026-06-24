@@ -1,8 +1,8 @@
 # Next steps (prioritized)
 
-**Baseline:** warm-serve 100M on `c6a.4xlarge` @ [`80c09f0`](https://github.com/tylerhannan/coldrun/commit/80c09f0) — see [`benchmarks/cloud-100m/`](benchmarks/cloud-100m/) and [`PERF.md`](PERF.md).
+**Baseline:** warm-serve 100M on `c6a.4xlarge` @ [`657f98d`](https://github.com/tylerhannan/coldrun/commit/657f98d) — see [`benchmarks/cloud-100m/`](benchmarks/cloud-100m/) and [`PERF.md`](PERF.md).
 
-**Goal:** shrink the **321.843s** hot sum (all 43) toward ClickHouse **~32s**, without regressing 1M correctness (**43/43** vs CH) or warm-serve stability on 32 GiB.
+**Goal:** shrink the **320.234s** hot sum (all 43) toward ClickHouse **~32s**, without regressing 1M correctness (**43/43** vs CH) or warm-serve stability on 32 GiB.
 
 **How to bench:** tiered workflow in [`benchmarks/MEASUREMENT.md`](benchmarks/MEASUREMENT.md#iteration-tiers-when-to-use-100m) — most iterations on laptop 1M; 100M VM only for scale-sensitive milestones (tmux required on cloud).
 
@@ -68,8 +68,8 @@ Full-column utf8 decode on 100M rows dominates. Same fix class: **scan compresse
 
 | # | Query | CR hot | CH hot | Work | Code |
 |---|-------|--------|--------|------|------|
-| 1.1 | **Q24** | **49.990s** | 0.10s | Confirmed in full warm 43-query rerun @ `80c09f0` (tries [84.866, 50.050, 49.990]) | [`scan_stream.rs`](../crates/coldrun-core/src/exec/scan_stream.rs), [`table.rs`](../crates/coldrun-core/src/storage/table.rs) |
-| 1.2 | **Q23** | **56.151s** | 0.61s | Confirmed in full warm 43-query rerun @ `80c09f0` (tries [56.839, 56.151, 56.275]) | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
+| 1.1 | **Q24** | **49.808s** | 0.10s | Reconfirmed in full warm 43-query rerun @ `657f98d` (tries [70.488, 49.808, 49.813]) | [`scan_stream.rs`](../crates/coldrun-core/src/exec/scan_stream.rs), [`table.rs`](../crates/coldrun-core/src/storage/table.rs) |
+| 1.2 | **Q23** | **52.715s** | 0.61s | Reconfirmed in full warm 43-query rerun @ `657f98d` (tries [60.154, 52.720, 52.715]) | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
 
 **Success target:** each ≪ **60s** on warm serve (stretch: ≪ **10s**). ✅ Reached and confirmed in full 43-query warm rerun.
 
@@ -94,6 +94,17 @@ Full-column utf8 decode on 100M rows dominates. Same fix class: **scan compresse
 | **All-43 hot sum** | **321.843s** (was 669.4s pre-V2) |
 | **Load/data context** | Reload completed (`/data/load-v2.log`, `EXIT:0`), bench-reported size `14176149601` bytes |
 | **Log** | `/data/bench-v2-warm-full.log` |
+
+### P1 confirmation — full warm rerun (`657f98d`)
+
+| Item | Result |
+|------|--------|
+| **Bench command** | `./scripts/bench-serve.sh 100000000 --skip-load --write-snapshot` |
+| **Q23 hot** | **52.715s** (tries [60.154, 52.720, 52.715]) |
+| **Q24 hot** | **49.808s** (tries [70.488, 49.808, 49.813]) |
+| **All-43 hot sum** | **320.234s** |
+| **Q36 hot** | **84.582s** (tries [83.109, 84.675, 84.582]) |
+| **Log** | `/data/bench-v2-warm-full-rerun.log` |
 
 Detail: [`perf/q-23.md`](perf/q-23.md), [`perf/q-24.md`](perf/q-24.md).
 
@@ -121,11 +132,11 @@ Detail: [`perf/q-23.md`](perf/q-23.md), [`perf/q-24.md`](perf/q-24.md).
 
 ## P2 — High ratio, large Δ (tail Q25–43)
 
-Excluding Q23/Q24, Q25–43 sum is **168.958s** vs CH **~23s**.
+Excluding Q23/Q24, Q25–43 sum is **171.109s** vs CH **~23s**.
 
 | # | Query | CR hot | CH hot | Work | Code |
 |---|-------|--------|--------|------|------|
-| 2.1 | **Q36** | 77.317s | 0.25s | Adaptive `ClientIP` top-k path landed and isolated formal 3-try validated @ `f65f585` (83.278, 78.800, 77.317); next: confirm in full warm 43-query snapshot | [`group_columnar.rs`](../crates/coldrun-core/src/exec/group_columnar.rs), [`q-36.md`](perf/q-36.md) |
+| 2.1 | **Q36** | 84.582s | 0.25s | Isolated Q36 run reached 77.317s, but full warm rerun @ `657f98d` regressed to 84.582s; investigate contention/variance and rework path | [`group_columnar.rs`](../crates/coldrun-core/src/exec/group_columnar.rs), [`q-36.md`](perf/q-36.md) |
 | 2.2 | **Q41** | 7.5s | 0.013s | Tighten zone + sort path; single-pass 5-col dashboard GROUP BY without repeated string decode | [`group_columnar.rs`](../crates/coldrun-core/src/exec/group_columnar.rs), [`q-41.md`](perf/q-41.md) |
 | 2.3 | **Q33–35** | ~15–17s | ~3s | Multi-column utf8/int GROUP BY — extend columnar shard pattern from Q31–32 | [`group_fused.rs`](../crates/coldrun-core/src/exec/group_fused.rs), [`column_slice.rs`](../crates/coldrun-core/src/storage/column_slice.rs) |
 
