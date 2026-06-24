@@ -29,25 +29,25 @@ Complete warm-serve run on AWS `c6a.4xlarge` (32 GiB), `/data/coldrun` ~100M row
 
 | Metric | Coldrun (hot) | ClickHouse (official hot) |
 |--------|---------------|---------------------------|
-| **Q1–22 sum** | **46.602s** | ~9.6s |
-| **Q24–43 sum** | **220.917s** | ~22.8s |
-| **42 queries** (bench; Q23 skipped) | **267.519s** | **~32.4s** |
-| **All 43** | **320.234s** | **~32.4s** |
+| **Q1–22 sum** | **46.377s** | ~9.6s |
+| **Q24–43 sum** | **216.422s** | ~22.8s |
+| **42 queries** (bench; Q23 skipped) | **262.799s** | **~32.4s** |
+| **All 43** | **316.515s** | **~32.4s** |
 
-**Commit:** `657f98d` · **Log:** `/data/bench-v2-warm-full-rerun.log`
+**Commit:** `51a8b61` · **Log:** `/data/bench-v2-warm-q36check.log`
 
 | Query | CR | CH | Notes |
 |-------|-----|-----|-------|
 | Q14 | 9.2s | 0.75s | sort distinct still ~12× |
 | Q17–19 | 3.2s / 1.2s / 3.4s | 1.6s / 0.94s / 2.7s | sort agg (was 12s / 21s / 27s pre-fix) |
 | Q21–22 | 4.5s / 4.9s | 0.31s / 0.09s | string GROUP BY |
-| Q23 | 52.7s | 0.61s | block-reader + V2 writer path (full warm @ `657f98d`) |
-| Q24 | 49.8s | 0.10s | block-reader + V2 writer path (full warm @ `657f98d`) |
+| Q23 | 53.7s | 0.61s | block-reader + V2 writer path (full warm @ `51a8b61`) |
+| Q24 | 49.7s | 0.10s | block-reader + V2 writer path (full warm @ `51a8b61`) |
 | Q25 | 0.008s | 0.038s | **CR wins** |
 | Q29 | 7.9s | 9.6s | **CR wins** |
 | Q33–35 | ~15–17s | ~3–4s | multi-column GROUP BY |
-| Q36 | 84.6s | 0.25s | still dominant tail outlier; isolated Q36 run did not hold in full warm |
-| Q41 | 7.4s | 0.013s | dashboard 5-col GROUP BY |
+| Q36 | 80.8s | 0.25s | improved vs prior full warm, still dominant tail outlier |
+| Q41 | 7.5s | 0.013s | dashboard 5-col GROUP BY |
 
 Runbook: use the cloud workflow in [`../README.md`](../README.md) ("Cloud dev box").
 
@@ -59,15 +59,15 @@ After landing block-reader wiring + V2 writer, we reloaded 100M rows on the same
 
 - **Load log:** `/data/load-v2.log` (`EXIT:0`, 27 `.col` + 27 `.blocks.json`)
 - **Targeted bench log:** `/data/bench-v2-q23q24.log` (`c107ad4`)
-- **Full warm bench logs:** `/data/bench-v2-warm-full.log` (`80c09f0`), `/data/bench-v2-warm-full-rerun.log` (`657f98d`)
+- **Full warm bench logs:** `/data/bench-v2-warm-full.log` (`80c09f0`), `/data/bench-v2-warm-full-rerun.log` (`657f98d`), `/data/bench-v2-warm-q36check.log` (`51a8b61`)
 - **Data size:** `14176149601` bytes reported by full warm bench (`~14.2 GB`)
 
-| Query | Pre-V2 hot | V2 targeted (`c107ad4`) | V2 full warm (`657f98d`) |
+| Query | Pre-V2 hot | V2 targeted (`c107ad4`) | V2 full warm (`51a8b61`) |
 |-------|------------|--------------------------|--------------------------|
-| Q23 | 222.341s | **54.501s** | **52.715s** |
-| Q24 | 231.3s | **48.673s** | **49.808s** |
+| Q23 | 222.341s | **54.501s** | **53.716s** |
+| Q24 | 231.3s | **48.673s** | **49.746s** |
 
-Full all-43 hot sum moved from **669.4s** to **320.234s**.
+Full all-43 hot sum moved from **669.4s** to **316.515s**.
 
 ## Sort-based aggregation (`agg_sort.rs`, Jun 2026)
 
