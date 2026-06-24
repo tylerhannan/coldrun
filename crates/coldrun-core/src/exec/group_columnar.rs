@@ -328,22 +328,25 @@ fn dashboard_q41_topk_serial(
     limit: usize,
     offset: usize,
 ) -> Vec<(u128, u64)> {
-    let keys = collect_q41_keys(
-        zone_ranges,
-        referer_hash,
-        counter,
-        min_date,
-        max_date,
-        is_refresh,
-        referer,
-        counters,
-        dates,
-        refresh,
-        traffic,
-        url_hashes,
-        url_high,
-    );
-    super::agg_sort::sorted_topk_u128(&keys, limit, offset)
+    let mut shards = empty_shards(zone_ranges.len().saturating_mul(CHUNK));
+    for &(start, end) in zone_ranges {
+        for_each_q41_zone_match(
+            start,
+            end,
+            referer_hash,
+            counter,
+            min_date,
+            max_date,
+            is_refresh,
+            referer,
+            counters,
+            dates,
+            refresh,
+            traffic,
+            |i| shard_add(&mut shards, pack_q41_pair(url_hashes[i], dates[i], url_high)),
+        );
+    }
+    topk_from_shards(shards, limit, offset)
 }
 
 fn dashboard_q41_topk_parallel(
@@ -363,7 +366,7 @@ fn dashboard_q41_topk_parallel(
     limit: usize,
     offset: usize,
 ) -> Vec<(u128, u64)> {
-    let keys = collect_q41_keys(
+    let shards = collect_q41_counts_shards(
         zone_ranges,
         referer_hash,
         counter,
@@ -378,10 +381,10 @@ fn dashboard_q41_topk_parallel(
         url_hashes,
         url_high,
     );
-    super::agg_sort::sorted_topk_u128(&keys, limit, offset)
+    topk_from_shards(shards, limit, offset)
 }
 
-fn collect_q41_keys(
+fn collect_q41_counts_shards(
     zone_ranges: &[(usize, usize)],
     referer_hash: i64,
     counter: i32,
@@ -395,13 +398,13 @@ fn collect_q41_keys(
     traffic: &[i16],
     url_hashes: &[i64],
     url_high: bool,
-) -> Vec<u128> {
+) -> ShardMaps {
     use rayon::prelude::*;
     let subranges = zone_subranges(zone_ranges, CHUNK);
     subranges
         .par_iter()
         .map(|&(start, end)| {
-            let mut keys = Vec::new();
+            let mut local = empty_shards(end.saturating_sub(start));
             for_each_q41_zone_match(
                 start,
                 end,
@@ -415,14 +418,11 @@ fn collect_q41_keys(
                 dates,
                 refresh,
                 traffic,
-                |i| keys.push(pack_q41_pair(url_hashes[i], dates[i], url_high)),
+                |i| shard_add(&mut local, pack_q41_pair(url_hashes[i], dates[i], url_high)),
             );
-            keys
+            local
         })
-        .reduce(Vec::new, |mut a, mut b| {
-            a.append(&mut b);
-            a
-        })
+        .reduce(|| empty_shards(subranges.len().saturating_mul(CHUNK)), merge_shard_maps)
 }
 
 /// Q41 fallback when zone index is unavailable.
