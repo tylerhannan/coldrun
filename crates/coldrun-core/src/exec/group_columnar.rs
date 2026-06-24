@@ -15,6 +15,13 @@ const Q41_PARALLEL_THRESHOLD: usize = 250_000;
 const Q36_HASH_THRESHOLD: usize = 1_000_000;
 const COUNT_SHARDS: usize = 256;
 
+#[derive(Debug, Clone)]
+pub struct Q36TopkStats {
+    pub mode: &'static str,
+    pub sample_unique_ratio: f64,
+    pub groups_counted: Option<usize>,
+}
+
 #[inline(always)]
 pub fn pack_clientip_quad(ip: i32) -> u128 {
     let u = ip as u32;
@@ -96,29 +103,53 @@ fn topk_from_shards(shards: ShardMaps, limit: usize, offset: usize) -> Vec<(u128
     merge_global_topk(candidates.into_iter(), limit, offset)
 }
 
-/// Q36: sort ClientIP + run-length counts — no multi-million-entry hash map.
-pub fn clientip_quad_topk(ips: &[i32], limit: usize, offset: usize) -> Vec<(u128, u64)> {
+pub fn clientip_quad_topk_with_stats(
+    ips: &[i32],
+    limit: usize,
+    offset: usize,
+) -> (Vec<(u128, u64)>, Q36TopkStats) {
     if ips.is_empty() || limit == 0 {
-        return Vec::new();
+        return (
+            Vec::new(),
+            Q36TopkStats {
+                mode: "empty",
+                sample_unique_ratio: 1.0,
+                groups_counted: Some(0),
+            },
+        );
     }
 
     // Q36 can be either high-duplicate or near-unique depending on data.
     // Use hash counting only when a small sample suggests enough reuse.
-    if ips.len() >= Q36_HASH_THRESHOLD && estimated_unique_ratio(ips) <= 0.90 {
-        let top = clientip_topk_hash(ips, limit, offset);
+    let sample_unique_ratio = estimated_unique_ratio(ips);
+    if ips.len() >= Q36_HASH_THRESHOLD && sample_unique_ratio <= 0.90 {
+        let (top, groups_counted) = clientip_topk_hash(ips, limit, offset);
         if !top.is_empty() {
-            return top
-                .into_iter()
-                .map(|(ip, c)| (pack_clientip_quad(ip), c))
-                .collect();
+            return (
+                top.into_iter()
+                    .map(|(ip, c)| (pack_clientip_quad(ip), c))
+                    .collect(),
+                Q36TopkStats {
+                    mode: "hash",
+                    sample_unique_ratio,
+                    groups_counted: Some(groups_counted),
+                },
+            );
         }
     }
 
     use super::agg_sort::sorted_topk_i32;
-    sorted_topk_i32(ips, limit, offset)
-        .into_iter()
-        .map(|(ip, c)| (pack_clientip_quad(ip as i32), c))
-        .collect()
+    (
+        sorted_topk_i32(ips, limit, offset)
+            .into_iter()
+            .map(|(ip, c)| (pack_clientip_quad(ip as i32), c))
+            .collect(),
+        Q36TopkStats {
+            mode: "sort",
+            sample_unique_ratio,
+            groups_counted: None,
+        },
+    )
 }
 
 fn estimated_unique_ratio(ips: &[i32]) -> f64 {
@@ -140,12 +171,12 @@ fn estimated_unique_ratio(ips: &[i32]) -> f64 {
     }
 }
 
-fn clientip_topk_hash(ips: &[i32], limit: usize, offset: usize) -> Vec<(i32, u64)> {
+fn clientip_topk_hash(ips: &[i32], limit: usize, offset: usize) -> (Vec<(i32, u64)>, usize) {
     use rayon::prelude::*;
 
     let need = limit.saturating_add(offset);
     if need == 0 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
 
     let mut counts = ips
@@ -170,8 +201,9 @@ fn clientip_topk_hash(ips: &[i32], limit: usize, offset: usize) -> Vec<(i32, u64
         });
 
     if counts.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
+    let groups_counted = counts.len();
 
     // ORDER BY count DESC, ClientIP ASC.
     let mut heap: BinaryHeap<Reverse<(u64, Reverse<i32>)>> = BinaryHeap::new();
@@ -193,7 +225,10 @@ fn clientip_topk_hash(ips: &[i32], limit: usize, offset: usize) -> Vec<(i32, u64
         .map(|Reverse((c, rip))| (rip.0, c))
         .collect();
     out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    out.into_iter().skip(offset).take(limit).collect()
+    (
+        out.into_iter().skip(offset).take(limit).collect(),
+        groups_counted,
+    )
 }
 
 #[inline(always)]
