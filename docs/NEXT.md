@@ -136,7 +136,7 @@ Excluding Q23/Q24, Q25–43 sum is **171.109s** vs CH **~23s**.
 
 | # | Query | CR hot | CH hot | Work | Code |
 |---|-------|--------|--------|------|------|
-| 2.1 | **Q36** | 84.582s | 0.25s | Isolated Q36 run reached 77.317s, but full warm rerun @ `657f98d` regressed to 84.582s; investigate contention/variance and rework path | [`group_columnar.rs`](../crates/coldrun-core/src/exec/group_columnar.rs), [`q-36.md`](perf/q-36.md) |
+| 2.1 | **Q36** | 84.582s | 0.25s | Isolated Q36 rerun on new instrumentation commit reached 76.962s (`dd0f3cf`), but last full warm (`657f98d`) is still 84.582s; next: confirm hold in full warm 43-query snapshot | [`group_columnar.rs`](../crates/coldrun-core/src/exec/group_columnar.rs), [`q-36.md`](perf/q-36.md) |
 | 2.2 | **Q41** | 7.5s | 0.013s | Tighten zone + sort path; single-pass 5-col dashboard GROUP BY without repeated string decode | [`group_columnar.rs`](../crates/coldrun-core/src/exec/group_columnar.rs), [`q-41.md`](perf/q-41.md) |
 | 2.3 | **Q33–35** | ~15–17s | ~3s | Multi-column utf8/int GROUP BY — extend columnar shard pattern from Q31–32 | [`group_fused.rs`](../crates/coldrun-core/src/exec/group_fused.rs), [`column_slice.rs`](../crates/coldrun-core/src/storage/column_slice.rs) |
 
