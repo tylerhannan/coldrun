@@ -11,7 +11,9 @@ pub fn topk_from_sorted_keys<K: Copy + Ord>(sorted: &[K], limit: usize, offset: 
     if need == 0 || sorted.is_empty() {
         return Vec::new();
     }
-    let mut heap: BinaryHeap<Reverse<(u64, K)>> = BinaryHeap::new();
+    // Min-heap of the current "worst kept" entry under:
+    // ORDER BY count DESC, key ASC  => worst is count ASC, key DESC.
+    let mut heap: BinaryHeap<Reverse<(u64, Reverse<K>)>> = BinaryHeap::new();
     let mut i = 0;
     while i < sorted.len() {
         let key = sorted[i];
@@ -23,7 +25,10 @@ pub fn topk_from_sorted_keys<K: Copy + Ord>(sorted: &[K], limit: usize, offset: 
         }
         push_run(&mut heap, count, key, need);
     }
-    let mut pairs: Vec<(u64, K)> = heap.into_iter().map(|Reverse(p)| p).collect();
+    let mut pairs: Vec<(u64, K)> = heap
+        .into_iter()
+        .map(|Reverse((c, rk))| (c, rk.0))
+        .collect();
     pairs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     pairs
         .into_iter()
@@ -34,12 +39,14 @@ pub fn topk_from_sorted_keys<K: Copy + Ord>(sorted: &[K], limit: usize, offset: 
 }
 
 #[inline]
-fn push_run<K: Ord>(heap: &mut BinaryHeap<Reverse<(u64, K)>>, count: u64, key: K, need: usize) {
+fn push_run<K: Ord>(heap: &mut BinaryHeap<Reverse<(u64, Reverse<K>)>>, count: u64, key: K, need: usize) {
+    let entry = (count, Reverse(key));
     if heap.len() < need {
-        heap.push(Reverse((count, key)));
-    } else if let Some(&Reverse((min_c, _))) = heap.peek() {
-        if count > min_c {
-            heap.push(Reverse((count, key)));
+        heap.push(Reverse(entry));
+    } else if let Some(Reverse(worst)) = heap.peek() {
+        // Keep tie order stable: if count ties, smaller key is better.
+        if entry.cmp(worst).is_gt() {
+            heap.push(Reverse(entry));
             if heap.len() > need {
                 heap.pop();
             }
@@ -98,7 +105,9 @@ pub fn sorted_topk_user_minute_phrase(
     if need == 0 || pairs.is_empty() {
         return Vec::new();
     }
-    let mut heap: BinaryHeap<Reverse<(u64, i64, i64, u64)>> = BinaryHeap::new();
+    // ORDER BY count DESC, user ASC, minute ASC, phrase ASC
+    // => worst kept is count ASC then (user,minute,phrase) DESC.
+    let mut heap: BinaryHeap<Reverse<(u64, Reverse<(i64, i64, u64)>)>> = BinaryHeap::new();
     let mut i = 0;
     while i < pairs.len() {
         let (user, minute, hash) = pairs[i];
@@ -112,11 +121,11 @@ pub fn sorted_topk_user_minute_phrase(
             count += 1;
             i += 1;
         }
-        let entry = (count, user, minute, hash);
+        let entry = (count, Reverse((user, minute, hash)));
         if heap.len() < need {
             heap.push(Reverse(entry));
-        } else if let Some(&Reverse((min_c, _, _, _))) = heap.peek() {
-            if count > min_c {
+        } else if let Some(&Reverse(worst)) = heap.peek() {
+            if entry > worst {
                 heap.push(Reverse(entry));
                 if heap.len() > need {
                     heap.pop();
@@ -124,8 +133,17 @@ pub fn sorted_topk_user_minute_phrase(
             }
         }
     }
-    let mut out: Vec<(u64, i64, i64, u64)> = heap.into_iter().map(|Reverse(t)| t).collect();
-    out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3))));
+    let mut out: Vec<(u64, i64, i64, u64)> = heap
+        .into_iter()
+        .map(|Reverse((c, rkey))| {
+            let (u, m, h) = rkey.0;
+            (c, u, m, h)
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3)))
+    });
     out.into_iter()
         .skip(offset)
         .take(limit)
@@ -149,7 +167,9 @@ pub fn sorted_topk_user_phrase(
     if need == 0 || pairs.is_empty() {
         return Vec::new();
     }
-    let mut heap: BinaryHeap<Reverse<(u64, i64, u64)>> = BinaryHeap::new();
+    // ORDER BY count DESC, user ASC, phrase ASC
+    // => worst kept is count ASC then (user,phrase) DESC.
+    let mut heap: BinaryHeap<Reverse<(u64, Reverse<(i64, u64)>)>> = BinaryHeap::new();
     let mut i = 0;
     while i < pairs.len() {
         let (user, hash) = pairs[i];
@@ -159,11 +179,11 @@ pub fn sorted_topk_user_phrase(
             count += 1;
             i += 1;
         }
-        let entry = (count, user, hash);
+        let entry = (count, Reverse((user, hash)));
         if heap.len() < need {
             heap.push(Reverse(entry));
-        } else if let Some(&Reverse((min_c, _, _))) = heap.peek() {
-            if count > min_c {
+        } else if let Some(&Reverse(worst)) = heap.peek() {
+            if entry > worst {
                 heap.push(Reverse(entry));
                 if heap.len() > need {
                     heap.pop();
@@ -171,7 +191,13 @@ pub fn sorted_topk_user_phrase(
             }
         }
     }
-    let mut out: Vec<(u64, i64, u64)> = heap.into_iter().map(|Reverse(t)| t).collect();
+    let mut out: Vec<(u64, i64, u64)> = heap
+        .into_iter()
+        .map(|Reverse((c, rkey))| {
+            let (u, h) = rkey.0;
+            (c, u, h)
+        })
+        .collect();
     out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1).then(a.2.cmp(&b.2))));
     out.into_iter()
         .skip(offset)
