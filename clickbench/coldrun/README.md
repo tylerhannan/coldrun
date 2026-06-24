@@ -49,4 +49,5 @@ See [`docs/PERF.md`](../../docs/PERF.md) for optimization notes (including **100
 
 Per-query implementation notes: [`docs/perf/`](../../docs/perf/) (maintained for fused-path queries; see PERF.md for current 100M strategy).
 
-Full **100M cloud run:** [`docs/CLOUD-RUN.md`](../../docs/CLOUD-RUN.md).
+Full **100M cloud run:** see the "Cloud dev box" section in [`README.md`](../../README.md).
+tr

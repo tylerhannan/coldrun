@@ -58,7 +58,7 @@ Target trajectory: Q23/Q24 **<120s** first milestone, then **<60s**, then tail-s
 |---|------|-----|--------|
 | 0.1 | ~~**Merge warning cleanup**~~ | Clean build signal before perf work | Done — merged [PR #1](https://github.com/tylerhannan/coldrun/pull/1) @ `118e60d` |
 | 0.2 | ~~**Formal Q23 bench**~~ | Only smoke (~234s); skews totals | Done — hot **222.341s** @ `dde9184` ([238.8, 229.9, 222.3]); log `/data/bench-q23-fix3.log` |
-| 0.3 | **Re-bench after each P1 fix** | Hot = min(try 2, 3); update [`cloud-100m/serve-hot.md`](benchmarks/cloud-100m/serve-hot.md) | tmux + `./scripts/bench-serve.sh 100000000 --skip-load --write-snapshot` — see [`CLOUD-RUN.md`](CLOUD-RUN.md) |
+| 0.3 | **Re-bench after each P1 fix** | Hot = min(try 2, 3); update [`cloud-100m/serve-hot.md`](benchmarks/cloud-100m/serve-hot.md) | tmux + `./scripts/bench-serve.sh 100000000 --skip-load --write-snapshot` — see cloud workflow in [`../README.md`](../README.md) |
 
 ---
 
@@ -175,7 +175,7 @@ Not blockers for tail sum but worth batching after P1–P2:
 | 6.3 | **ClickBench PR** | Submit `results/c6a.4xlarge.json` after Combined + stable warm path — [`clickbench/coldrun/`](../clickbench/coldrun/) |
 | 6.4 | **Update README step 4** | Keep [`README.md`](../README.md) build table in sync after next cloud snapshot |
 
-Runbook: [`CLOUD-RUN.md`](CLOUD-RUN.md).
+Runbook: cloud workflow in [`../README.md`](../README.md).
 
 ---
 

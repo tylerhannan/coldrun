@@ -49,7 +49,7 @@ Complete warm-serve run on AWS `c6a.4xlarge` (32 GiB), `/data/coldrun` ~100M row
 | Q36 | 83s | 0.25s | REGEXP_REPLACE — sort path not enough |
 | Q41 | 7.5s | 0.013s | dashboard 5-col GROUP BY |
 
-Runbook: [`CLOUD-RUN.md`](CLOUD-RUN.md).
+Runbook: use the cloud workflow in [`../README.md`](../README.md) ("Cloud dev box").
 
 Q23 formal pre-V2 bench (Jun 2026): hot **222.341s** — tries [238.8, 229.9, 222.3] @ `dde9184`, log `/data/bench-q23-fix3.log`.
 

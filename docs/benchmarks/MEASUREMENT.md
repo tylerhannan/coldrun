@@ -103,7 +103,7 @@ Until you have real Parquet locally, treat demo `bench-all` / `bench-serve` numb
 **Tier 3** optional middle ground on the bench VM:
 
 ```bash
-# tmux — see CLOUD-RUN.md
+# tmux run on the cloud VM
 ./scripts/sample-parquet.sh /data/hits.parquet 10000000 /data/hits-10m.parquet
 COLDRUN_DATA=/data/coldrun-10m ./clickbench/coldrun/load
 ./scripts/bench-serve.sh 10000000 --skip-load --from 23 --to 24

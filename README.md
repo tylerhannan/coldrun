@@ -117,7 +117,7 @@ Current perf VM — data already loaded; use for unattended warm + official runs
 | **ClickHouse** | `./scripts/install-clickhouse-local.sh` (already installed on dev box) |
 | **Current warm baseline** | `80c09f0` — all-43 hot **321.843s** (Q23 **56.151s**, Q24 **49.990s**) |
 
-Full checklist + unattended commands: [`docs/CLOUD-RUN.md`](docs/CLOUD-RUN.md)
+Full checklist + unattended commands are in the "Cloud dev box" section below.
 
 ### Preflight (5 min, on the VM)
 
