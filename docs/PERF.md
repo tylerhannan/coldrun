@@ -53,6 +53,21 @@ Runbook: [`CLOUD-RUN.md`](CLOUD-RUN.md).
 
 Q23 formal bench (Jun 2026): hot **222.341s** — tries [238.8, 229.9, 222.3] @ `dde9184`, log `/data/bench-q23-fix3.log`.
 
+### V2 blockized rerun (targeted Q23/Q24, Jun 2026)
+
+After landing block-reader wiring + V2 writer (`c107ad4`), we reloaded 100M rows on the same VM and ran a targeted warm bench for Q23/Q24 only:
+
+- **Load log:** `/data/load-v2.log` (`EXIT:0`, 27 `.col` + 27 `.blocks.json`)
+- **Bench log:** `/data/bench-v2-q23q24.log` (`./scripts/bench-serve.sh 100000000 --skip-load --from 23 --to 24 --no-compare`)
+- **Data size:** `14176147746` bytes reported by bench run (`~14.2 GB`)
+
+| Query | Pre-V2 hot | V2 hot (`c107ad4`) | Delta |
+|-------|------------|--------------------|-------|
+| Q23 | 222.341s | **54.501s** | **-167.840s (~4.1x faster)** |
+| Q24 | 231.3s | **48.673s** | **-182.627s (~4.8x faster)** |
+
+Targeted hot sum (Q23+Q24): **103.174s** (was ~453.6s).
+
 ## Sort-based aggregation (`agg_sort.rs`, Jun 2026)
 
 For 100M rows, hash maps with millions of groups or per-group `AHashSet` OOM or stall. Replacement pattern:

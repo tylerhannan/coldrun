@@ -62,3 +62,19 @@
 | All 43 | **669.4s** | **~32.4s** |
 
 Not ClickBench Combined (no cold protocol, no `drop_caches` per query). See [`compare-hot.md`](compare-hot.md).
+
+## V2 targeted rerun (Q23–Q24 only, Jun 2026)
+
+Targeted post-V2 run (not a full 43-query replacement snapshot yet):
+
+- **Commit:** `c107ad4`
+- **Load context:** `/data/load-v2.log` (`EXIT:0`, 27 `.col`, 27 `.blocks.json`)
+- **Bench command:** `./scripts/bench-serve.sh 100000000 --skip-load --from 23 --to 24 --no-compare`
+- **Bench log:** `/data/bench-v2-q23q24.log`
+
+| Q | tries (s) | hot (s) |
+|---|-----------|---------|
+| 23 | [54.583, 54.501, 54.549] | **54.501** |
+| 24 | [51.454, 48.749, 48.673] | **48.673** |
+
+Targeted hot sum (Q23+Q24): **103.174s**.

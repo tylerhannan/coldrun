@@ -62,3 +62,14 @@
 ## Near parity (ratio ≤ 2×)
 
 Q6, Q15, Q18, Q19, Q26, Q29 (CR wins on Q25, Q29)
+
+## V2 targeted delta (Q23/Q24 only, `c107ad4`)
+
+This run is a targeted 2-query warm rerun after V2 blockized writer + block-reader execution path. It is diagnostic and does not replace full-43 totals yet.
+
+| Q | Pre-V2 CR hot | V2 CR hot | CH hot | Pre-V2 ratio | V2 ratio |
+|---|---------------|-----------|--------|--------------|----------|
+| 23 | 222.341s | **54.501s** | 0.613s | 363x | **88.9x** |
+| 24 | 231.3s | **48.673s** | 0.098s | 2360x | **497x** |
+
+Log: `/data/bench-v2-q23q24.log`.

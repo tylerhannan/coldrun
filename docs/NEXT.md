@@ -68,10 +68,21 @@ Full-column utf8 decode on 100M rows dominates. Same fix class: **scan compresse
 
 | # | Query | CR hot | CH hot | Work | Code |
 |---|-------|--------|--------|------|------|
-| 1.1 | **Q24** | 231s | 0.10s | **Follow-up:** block-at-a-time URL scan + cell-at projection without full LZ4 expand (see below) | [`scan_stream.rs`](../crates/coldrun-core/src/exec/scan_stream.rs), [`table.rs`](../crates/coldrun-core/src/storage/table.rs) |
-| 1.2 | **Q23** | 222s | 0.61s | In progress: stable OOM-safe pass2 (row-slot map) shipped; next is block-at-a-time decode to push below 120s | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
+| 1.1 | **Q24** | **48.673s** | 0.10s | V2 targeted rerun @ `c107ad4` (3 tries: [51.454, 48.749, 48.673]); next: confirm in full warm 43-query snapshot | [`scan_stream.rs`](../crates/coldrun-core/src/exec/scan_stream.rs), [`table.rs`](../crates/coldrun-core/src/storage/table.rs) |
+| 1.2 | **Q23** | **54.501s** | 0.61s | V2 targeted rerun @ `c107ad4` (3 tries: [54.583, 54.501, 54.549]); next: confirm in full warm 43-query snapshot | [`group_fused_q23.rs`](../crates/coldrun-core/src/exec/group_fused_q23.rs) |
 
-**Success target:** each ≪ **60s** on warm serve (stretch: ≪ **10s**).
+**Success target:** each ≪ **60s** on warm serve (stretch: ≪ **10s**). ✅ Reached on targeted V2 rerun; pending full 43-query confirmation.
+
+### P1 milestone update — V2 targeted rerun (`c107ad4`)
+
+| Item | Result |
+|------|--------|
+| **Bench command** | `./scripts/bench-serve.sh 100000000 --skip-load --from 23 --to 24 --no-compare` |
+| **Q23 hot** | **54.501s** (tries [54.583, 54.501, 54.549]) |
+| **Q24 hot** | **48.673s** (tries [51.454, 48.749, 48.673]) |
+| **Combined (Q23+Q24)** | **103.174s** hot |
+| **Load/data context** | Reload @ `c107ad4` completed (`/data/load-v2.log`, `EXIT:0`), 27 `.col` + 27 `.blocks.json`, bench-reported size `14176147746` bytes |
+| **Log** | `/data/bench-v2-q23q24.log` |
 
 Detail: [`perf/q-23.md`](perf/q-23.md), [`perf/q-24.md`](perf/q-24.md).
 
